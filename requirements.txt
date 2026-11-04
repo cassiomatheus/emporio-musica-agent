@@ -1,4 +1,5 @@
 langchain
+langchain-classic>=1,<2
 langchain-core
 langchain-community
 langchain-ollama
