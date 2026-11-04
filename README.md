@@ -1,8 +1,14 @@
 # Empório da Música — Assistente de atendimento
 
-Assistente em português para consultar produtos, estoque, pedidos e políticas da loja, com interface Streamlit, ferramentas SQL e retrieval do PDF. O projeto oferece atendimento consultivo; não efetua pagamentos nem registra compras.
+## Problema e objetivos
 
-## 1. Como executar
+A Empório da Música é uma loja fictícia de instrumentos musicais cujo atendimento recebe perguntas recorrentes sobre catálogo, preços, estoque, pedidos e políticas comerciais. O desafio consiste em construir um protótipo de assistente capaz de responder a essas solicitações em linguagem natural, consultando as fontes apropriadas em vez de depender exclusivamente do conhecimento do modelo.
+
+O objetivo foi integrar dois tipos de informação: dados estruturados, armazenados originalmente em CSVs, e regras de atendimento descritas em um manual PDF. Para isso, desenvolvi um agente em Python que identifica quando consultar o banco de dados e quando recuperar trechos das políticas, mantendo o contexto de uma conversa e respondendo em português com uma persona amigável e profissional. A interface permite realizar consultas sucessivas sobre o mesmo produto, como preço, disponibilidade, parcelamento e frete.
+
+O escopo é **consultivo**: o agente não efetua compras, pagamentos, cancelamentos ou alterações de pedidos. A proposta é demonstrar a integração entre LLMs, ferramentas externas e dados de negócio, além de explicitar os limites do protótipo.
+
+## Como executar
 
 **Pré-requisitos:** Python com `venv` (ambiente validado com Python 3.14.6), [Ollama instalado](https://docs.ollama.com/linux), internet para os downloads iniciais e memória/espaço para os modelos. O provedor é o **Ollama local**, sem chave de API, no endereço padrão `http://localhost:11434`.
 
@@ -52,20 +58,69 @@ python -m unittest discover -s tests -v
 
 Teste o contexto na mesma conversa: escolha um produto, pergunte “Posso parcelar ele até quantas vezes?” e depois “Qual é o valor do frete?”. Essas perguntas estão no escopo; as condições devem ser consultadas nas políticas da loja.
 
-## 2. Decisões técnicas
+## Decisões arquiteturais
 
-| Escolha | Justificativa |
-| --- | --- |
-| **LangChain + `langchain-classic`** | Integram modelo, ferramentas SQL, retriever e histórico. `AgentExecutor` coordena as consultas com a API utilizada no projeto. |
-| **Qwen 3.5 9B via Ollama** | Permite inferência local e chamadas de ferramentas. Temperatura zero e `reasoning=False` priorizam respostas diretas; contexto de 8.192 tokens e saída de até 4.096 tokens acomodam consultas e listas. Não foi realizado benchmark comparativo de modelos. |
-| **SQLite para CSVs** | Mantém preços, estoque e pedidos estruturados, permitindo filtros e contagens por SQL. Evita usar similaridade textual para calcular totais. |
-| **ChromaDB + MiniLM para o PDF** | Índice vetorial persistente e embeddings locais com `all-MiniLM-L6-v2`. Trechos de 1.000 caracteres, sobreposição de 100 e recuperação dos três mais próximos são parâmetros iniciais para preservar continuidade e limitar o contexto. |
-| **Prompt com regras de domínio** | Orienta consultas SQL para dados e retrieval para políticas, resposta em português, distinção entre ativo e disponível, listagens completas e solicitação de dados ausentes. O histórico e os resultados das ferramentas entram no contexto do agente. |
-| **Guardião e memória por sessão** | O guardião classifica o escopo antes das ferramentas, usando contexto recente em JSON. A memória guarda a resposta final por UUID; o Streamlit mantém a apresentação e oferece reinício da conversa. |
+Optei por uma arquitetura em Python com um agente orientado a ferramentas. Os dados transacionais e as políticas documentais têm características diferentes e, por isso, são tratados por mecanismos distintos. O agente utiliza ferramentas SQL para informações estruturadas e uma ferramenta de recuperação semântica para o PDF. A interface, o histórico de mensagens e a classificação de escopo ficam separados dessas consultas.
 
-Fluxo: **pergunta → guardião → agente com histórico → SQL/retrieval → resposta**. Para listagens SQL simples de categoria reconhecidas por `src/catalog.py`, o código calcula os totais e monta a tabela diretamente do banco, reduzindo erros de contagem do modelo. A interface trata moeda e separação entre subtítulos e listas.
+**SQLite — dados estruturados.** Escolhi o SQLite por ser leve, relacional e suficiente para o volume dos arquivos fornecidos. Ele permite aplicar filtros, ordenações e contagens sobre produtos, estoque e pedidos sem depender de similaridade semântica ou da memória do LLM. A escolha também aproveitou minha experiência prévia com bancos de dados e processamento de informações no projeto de mestrado. Nesta versão, a ingestão importa produtos, pedidos e clientes; categorias, itens de pedidos e promoções ainda não integram o banco utilizado pelo agente.
 
-## 3. Limitações e próximos passos
+**ChromaDB — base vetorial.** Para as políticas da loja, aproveitei minha experiência de pesquisa com representações vetoriais, embeddings e recuperação de informações. O ChromaDB fornece um índice persistente, permitindo reutilizar os embeddings do manual entre execuções. A busca semântica é empregada para localizar trechos pertinentes; ela não substitui consultas exatas ao banco de produtos.
+
+**Streamlit — interface de demonstração.** Escolhi o Streamlit porque já tinha familiaridade com a construção de interfaces e visualizações em Python no contexto acadêmico. Como o objetivo da seleção é avaliar o agente funcionando, essa abordagem permitiu criar rapidamente um chat navegável sem desenvolver um frontend separado. O `session_state` mantém a apresentação da conversa e um identificador próprio para cada sessão.
+
+**LangChain — integração e orquestração.** O LangChain foi a principal tecnologia nova incorporada neste desafio. Adotei-o por oferecer abstrações prontas para conectar `ChatOllama`, ferramentas SQL, o retriever do ChromaDB e o histórico de mensagens. `create_tool_calling_agent` e `AgentExecutor` coordenam a seleção e execução das ferramentas; `RunnableWithMessageHistory` reaproveita o contexto da sessão.
+
+Isso reduziu a necessidade de implementar manualmente todo o protocolo de chamadas de ferramentas e permitiu concentrar o desenvolvimento nas regras de domínio e na experiência de atendimento. Como contrapartida, a solução depende de componentes de `langchain-classic` e de APIs de memória que exigirão acompanhamento de compatibilidade.
+
+## Escolha do modelo: Qwen 3.5 9B com Ollama
+
+Escolhi o `qwen3.5:9b` executado localmente pelo Ollama porque o desafio requer interpretação de mensagens em português e chamadas de ferramentas, e eu já tinha experiência prática com modelos locais e Ollama em atividades do mestrado. Reaproveitar esse ambiente reduziu o tempo de configuração e permitiu desenvolver e testar o agente sem depender de uma API paga a cada mensagem.
+
+O modelo é integrado por `ChatOllama`, com temperatura `0`, `reasoning=False`, janela configurada de `8.192` tokens e limite de geração de `4.096` tokens. Esses parâmetros procuram favorecer respostas diretas e disponibilizar contexto suficiente para histórico, ferramentas e seus resultados; temperatura zero, entretanto, não garante respostas sempre idênticas ou corretas.
+
+A escolha foi pragmática, considerando o hardware disponível e a experiência prévia com a ferramenta. **Não foi realizado um benchmark comparativo rigoroso entre diferentes modelos nesta implementação**, de modo que não afirmo que o Qwen 3.5 9B seja o melhor modelo possível para a tarefa.
+
+Uma evolução seria comparar modelos sob os mesmos cenários, incluindo qualidade de tool calling, latência, consumo de memória e respostas em português.
+
+## Estratégia de retrieval para as políticas da loja
+
+As informações de produtos e pedidos são consultadas via SQL; as regras sobre devolução, troca, garantia, horário, frete e pagamento são recuperadas do PDF por busca semântica.
+
+A ingestão divide o manual em **trechos de 1.000 caracteres, com sobreposição de 100 caracteres**, para reduzir a perda de contexto nas fronteiras entre fragmentos. Cada trecho é convertido em vetor pelo modelo `sentence-transformers/all-MiniLM-L6-v2` e armazenado no ChromaDB.
+
+Quando o agente precisa consultar uma política, a ferramenta `consulta_politicas_loja` busca os **três fragmentos mais próximos da pergunta (`top-k = 3`)**. O Qwen recebe esses trechos e formula a resposta.
+
+A utilização de embeddings e recuperação vetorial reaproveita conhecimentos e técnicas com os quais já trabalhava no mestrado, especialmente a representação semântica de textos. O tamanho dos trechos e o valor de `k` são parâmetros iniciais do protótipo, não resultados de uma otimização experimental.
+
+Essa abordagem possui limitações. A semelhança vetorial não garante que o trecho recuperado contenha todas as condições necessárias para responder. O modelo de embeddings escolhido pode ter limitações para perguntas formuladas em português, e a qualidade da recuperação ainda não foi medida sistematicamente com um conjunto de perguntas e evidências de referência.
+
+Além disso, a ingestão atual pode duplicar fragmentos se executada repetidamente no mesmo índice.
+
+Como próximos passos, avaliaria modelos multilíngues, diferentes configurações de chunking e top-k, além da reconstrução idempotente do índice.
+
+## Estratégia de prompt
+
+O prompt define a persona de atendimento em português e orienta o uso de SQL para catálogo, preços, estoque e pedidos, e de `consulta_politicas_loja` para condições comerciais. As regras distinguem produtos ativos de produtos com estoque, exigem consultas antes de informar valores e orientam a solicitação de dados ausentes, como o destino da entrega. O histórico da sessão e os resultados das ferramentas entram no contexto para permitir perguntas de continuação.
+
+As instruções também tratam a apresentação: listas completas quando solicitadas, nomes comerciais dos produtos em vez de códigos internos de categoria e alternativas com disponibilidade consultada. Para listagens simples reconhecidas por `src/catalog.py`, a tabela e os totais são calculados diretamente do SQLite. Essa verificação complementa o prompt, sem tornar todas as respostas determinísticas.
+
+## Segurança e controle de escopo
+
+Antes de chamar o agente, a função `process_user_message` executa um **guardião de escopo**. Esse componente utiliza o mesmo Qwen para classificar a mensagem como `PERMITIDA` ou `BLOQUEADA`, considerando a pergunta atual e um histórico recente limitado, transmitido como dados JSON.
+
+Perguntas sobre instrumentos e atendimento da loja são encaminhadas; solicitações externas ao domínio, como produção de código ou assuntos sem relação com a loja, são recusadas educadamente.
+
+Se o classificador devolver um formato inválido, o sistema tenta novamente uma vez. Persistindo a saída inválida, apresenta um erro de validação em vez de liberar automaticamente o agente.
+
+O histórico do atendimento é separado por identificador de sessão e permanece apenas na memória do processo; a opção **Nova conversa** reinicia esse estado.
+
+**Limite importante:** esse guardião controla assunto, não identidade nem permissões de acesso.
+
+A versão atual não autentica clientes, não implementa autorização específica para visualizar pedidos e ainda não impõe uma restrição dedicada de somente leitura às ferramentas SQL. Portanto, não seria correto apresentar o sistema como preparado para consultar dados pessoais de clientes em produção.
+
+Antes de qualquer uso real, seria necessário acrescentar autenticação, autorização por titularidade, privilégios mínimos no banco e revisão da exposição de detalhes técnicos nas mensagens de erro. O classificador por LLM também não constitui proteção comprovada contra todas as formas de prompt injection.
+
+## Limitações e próximos passos
 
 **Limitações conhecidas:**
 
@@ -76,15 +131,19 @@ Fluxo: **pergunta → guardião → agente com histórico → SQL/retrieval → 
 
 **Com mais tempo:** integrar as fontes restantes e tornar a ingestão idempotente; avaliar embeddings multilíngues e reranking com perguntas de referência; ampliar testes de fluxo e precisão das respostas; persistir memória, implementar controles de acesso e SQL somente leitura; fixar versões e migrar as APIs de memória legadas.
 
-## 4. Uso de assistente de código
+## Uso do OpenAI Codex no desenvolvimento
 
-Foi utilizado o **OpenAI Codex**, com acesso ao repositório e ao terminal, como apoio à implementação, diagnóstico e documentação. O workflow foi iterativo:
+Utilizei o **OpenAI Codex** como assistente de programação durante a implementação, depuração e documentação do protótipo.
 
-1. Os testes manuais do chat forneceram erros de execução, respostas incorretas e exemplos de quebra do fluxo de compra.
-2. O Codex inspecionou código, dados e logs, propôs e aplicou ajustes de compatibilidade do LangChain, catálogo, formatação, memória e guardião.
-3. As alterações foram verificadas com testes automatizados, testes da interface via Streamlit AppTest e chamadas ao Ollama local; novos testes manuais orientaram as correções seguintes.
+O uso da ferramenta foi organizado em ciclos: observar comportamentos do chat, identificar um problema ou necessidade, examinar os módulos relacionados, propor um ajuste e verificar seus efeitos por meio de testes e novas interações.
 
-A IA também auxiliou na redação deste README. As verificações cobrem os casos exercitados e não representam garantia de acerto em todos os cenários de atendimento.
+O Codex apoiou ajustes de compatibilidade do LangChain, consultas e apresentação do catálogo, formatação no Streamlit, gerenciamento da memória e classificação de escopo. Também auxiliou na criação e execução de testes automatizados e na redação da documentação.
+
+As verificações documentadas incluem `unittest`, testes da interface com Streamlit AppTest e interações manuais com o Ollama; os testes com dependências simuladas não substituem a avaliação das respostas do modelo real.
+
+O uso de IA acelerou tarefas repetitivas e a investigação de erros, mas o código gerado precisa ser compreendido e revisado antes da entrega.
+
+Minha responsabilidade é conseguir explicar as decisões adotadas, reproduzir as funcionalidades essenciais, identificar limitações e distinguir comportamentos comprovados de hipóteses ainda não avaliadas. Não apresento a utilização do Codex, isoladamente, como garantia de qualidade da solução.
 
 Detalhes de arquitetura, módulos, solução de problemas e operação estão no [guia completo](README_full.md).
 

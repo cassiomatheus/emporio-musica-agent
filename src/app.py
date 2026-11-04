@@ -6,7 +6,14 @@ from agent import process_user_message
 from memory import memory_manager
 
 
-def chat_markdown(text: str) -> str:
+def chat_markdown(text: str, *, hide_category_codes: bool = False) -> str:
+    if hide_category_codes:
+        text = re.sub(
+            r"[ \t]*\(\s*categorias?\s+\d+(?:\s*(?:,|e|/)\s*\d+)*\s*\)",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
     # Separar subtítulos do primeiro produto, preservando a numeração original.
     text = re.sub(
         r"(?m)^(\*\*[^*\n]+:\*\*)[ \t]+(\d+[.)][ \t]+\*\*)",
@@ -38,7 +45,9 @@ if "messages" not in st.session_state:
 # Renderiza as mensagens anteriores na tela
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
-        st.markdown(chat_markdown(msg["content"]))
+        st.markdown(chat_markdown(
+            msg["content"], hide_category_codes=msg["role"] == "assistant"
+        ))
 
 # Caixa de input para o usuário
 if user_input := st.chat_input("Digite sua pergunta..."):
@@ -54,7 +63,7 @@ if user_input := st.chat_input("Digite sua pergunta..."):
                 resposta_agente = process_user_message(
                     user_input, session_id=st.session_state.session_id
                 )
-                st.markdown(chat_markdown(resposta_agente))
+                st.markdown(chat_markdown(resposta_agente, hide_category_codes=True))
             except Exception as e:
                 resposta_agente = f"Desculpe, ocorreu um erro interno ao processar sua requisição. Detalhe técnico: {e}"
                 st.error(resposta_agente)
