@@ -4,6 +4,7 @@ from langchain_community.agent_toolkits import SQLDatabaseToolkit
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.tools import create_retriever_tool
+from catalog import render_catalog_query
 from langchain_classic.agents import create_tool_calling_agent, AgentExecutor
 from langchain_classic.agents.format_scratchpad.tools import format_to_tool_messages
 from langchain_core.messages import AIMessage, HumanMessage
@@ -11,7 +12,10 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 # 1. Configurar o LLM (use o nome exato exibido por `ollama list`).
 # Solicitar a resposta final sem o modo thinking do Qwen.
-llm = ChatOllama(model="qwen3.5:9b", temperature=0, reasoning=False)
+llm = ChatOllama(
+    model="qwen3.5:9b", temperature=0, reasoning=False,
+    num_ctx=8192, num_predict=4096,
+)
 
 # 2. Configurar Ferramentas do SQL (Estoque, Pedidos, Clientes)
 db = SQLDatabase.from_uri("sqlite:///db/emporio.db")
@@ -65,6 +69,14 @@ def get_agent_response(user_input: str, chat_history: list) -> str:
         "input": user_input,
         "chat_history": chat_history
     })
+    # Garantir totais exatos e a tabela completa nas listagens SQL de categoria.
+    for action, observation in reversed(response.get("intermediate_steps", [])):
+        if action.tool == "sql_db_query":
+            if isinstance(action.tool_input, dict) and not str(observation).startswith("Error:"):
+                catalog_text = render_catalog_query(action.tool_input.get("query", ""))
+                if catalog_text is not None:
+                    return catalog_text
+            break
     text = AIMessage(content=response.get("output") or "").text.strip()
     if text:
         return text

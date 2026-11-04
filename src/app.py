@@ -1,6 +1,14 @@
+import re
+
 import streamlit as st
 from agent import get_agent_response
 from langchain_core.messages import HumanMessage, AIMessage
+
+
+def chat_markdown(text: str) -> str:
+    # Valores monetários não devem ser interpretados como fórmulas LaTeX.
+    return re.sub(r"(?<!\\)\$", r"\\$", text)
+
 
 st.set_page_config(page_title="Empório da Música - Atendimento", page_icon="🎸", layout="centered")
 
@@ -16,13 +24,13 @@ if "messages" not in st.session_state:
 # Renderiza as mensagens anteriores na tela
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+        st.markdown(chat_markdown(msg["content"]))
 
 # Caixa de input para o usuário
 if user_input := st.chat_input("Digite sua pergunta..."):
     
     # Exibe a pergunta do usuário na UI
-    st.chat_message("user").markdown(user_input)
+    st.chat_message("user").markdown(chat_markdown(user_input))
     st.session_state.messages.append({"role": "user", "content": user_input})
     
     # Processa a resposta do agente com um spinner visual
@@ -30,7 +38,7 @@ if user_input := st.chat_input("Digite sua pergunta..."):
         with st.spinner("Buscando informações..."):
             try:
                 resposta_agente = get_agent_response(user_input, st.session_state.chat_history)
-                st.markdown(resposta_agente)
+                st.markdown(chat_markdown(resposta_agente))
             except Exception as e:
                 resposta_agente = f"Desculpe, ocorreu um erro interno ao processar sua requisição. Detalhe técnico: {e}"
                 st.error(resposta_agente)
