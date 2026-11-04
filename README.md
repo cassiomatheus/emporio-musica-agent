@@ -7,7 +7,8 @@ Assistente em português para consultar instrumentos, preços, estoque, pedidos 
 - **Dados estruturados:** os CSVs de produtos, pedidos e clientes são importados para SQLite. O agente usa ferramentas SQL para consultar essas informações.
 - **Políticas da loja:** o PDF é dividido em trechos, convertido em embeddings com `sentence-transformers/all-MiniLM-L6-v2` e indexado no ChromaDB. A ferramenta de consulta de políticas recupera os três trechos mais próximos da pergunta.
 - **Modelo:** o `qwen3.5:9b`, via `ChatOllama`, decide quais ferramentas consultar e prepara a resposta. O código usa `langchain-classic` para `AgentExecutor` e `create_tool_calling_agent`.
-- **Interface:** o chat mantém o histórico durante a sessão do Streamlit e protege os símbolos de moeda da interpretação como fórmulas LaTeX.
+- **Memória e guardião:** `process_user_message` verifica o escopo antes de executar as ferramentas. `RunnableWithMessageHistory` mantém as mensagens aceitas e as respostas finais por ID de sessão.
+- **Interface:** o Streamlit gera um ID exclusivo por sessão, mantém as mensagens para exibição e protege os símbolos de moeda da interpretação como fórmulas LaTeX.
 
 SQLite e ChromaDB mantêm os dados no diretório do projeto. Os modelos são baixados inicialmente; a inferência do Qwen é feita pelo Ollama local.
 
@@ -53,13 +54,14 @@ Se o Ollama já estiver funcionando como serviço, não é necessário iniciar o
 A configuração atual em `src/agent.py` é:
 
 ```python
+model_name = "qwen3.5:9b"
 llm = ChatOllama(
-    model="qwen3.5:9b", temperature=0, reasoning=False,
+    model=model_name, temperature=0, reasoning=False,
     num_ctx=8192, num_predict=4096,
 )
 ```
 
-Para trocar o modelo, baixe a nova versão e ajuste `model` nesse arquivo para o nome exato exibido por `ollama list`. O modelo deve suportar chamadas de ferramentas; confira também a compatibilidade com `reasoning=False`.
+Para trocar o modelo, baixe a nova versão e ajuste `model_name` nesse arquivo para o nome exato exibido por `ollama list`. O agente e o guardião usam esse mesmo nome. O modelo deve suportar chamadas de ferramentas; confira também a compatibilidade com `reasoning=False`.
 
 ## 3. Preparar os dados
 
@@ -110,7 +112,21 @@ O prompt orienta o agente a listar todos os resultados solicitados, sem um limit
 
 Para consultas SQL completas de categoria reconhecidas por `src/catalog.py`, a tabela final e os totais são gerados diretamente do SQLite. Isso evita depender do modelo para contar ou reescrever todos os itens. Esse tratamento aceita consultas simples com categoria, status ativo e filtro opcional de estoque; consultas com outros filtros, agregações, joins ou `LIMIT` seguem o fluxo normal do agente.
 
-Se o agente retornar texto vazio, o código tenta gerar uma resposta novamente a partir dos resultados das ferramentas. Se a segunda tentativa também vier vazia, o chat exibe um erro. O histórico fica na sessão do Streamlit, sem armazenamento permanente das conversas.
+Se o agente retornar texto vazio, o código tenta gerar uma resposta novamente a partir dos resultados das ferramentas. Se a segunda tentativa também vier vazia, o chat exibe um erro.
+
+## Memória e guardião
+
+A entrada principal do chat é `process_user_message(user_input, session_id)`, definida em `src/agent.py` e chamada por `src/app.py`:
+
+1. A interface cria um UUID por sessão e reutiliza esse ID nas mensagens seguintes. IDs fixos compartilhariam a memória entre usuários.
+2. `src/guardrails.py` classifica a pergunta com o mesmo modelo do agente, considerando até quatro mensagens anteriores, com até 1.200 caracteres por mensagem. Esse contexto é enviado como dados JSON, separado das instruções do classificador. Parcelamento, pagamentos, frete, políticas da loja e continuações de conversa estão no escopo permitido, mesmo quando o cliente usa “ele” ou “esse”. Só a classificação exata `PERMITIDA` libera o agente. Uma saída inválida é tentada novamente; se a falha persistir, a interface informa o erro de validação, em vez de recusar a pergunta como fora de escopo.
+3. Para entradas aceitas, `RunnableWithMessageHistory` fornece o histórico a `get_agent_response`, que mantém as correções de catálogo e a recuperação de respostas vazias.
+4. A memória registra uma única vez a pergunta e a resposta final efetivamente exibida, incluindo a tabela corrigida do catálogo. Perguntas bloqueadas e turnos com falha não são gravados na memória do agente; as mensagens exibidas continuam no histórico visual da interface.
+5. O botão **Nova conversa** limpa a memória da sessão atual, reinicia o histórico visual e gera outro ID.
+
+`src/memory.py` mantém os históricos em um dicionário no processo Python. Reiniciar o servidor perde essa memória, e uma nova sessão do Streamlit recebe outro ID. Não há persistência em Redis ou banco de dados. A classificação do guardião depende do modelo; a configuração atual não representa autenticação de clientes nem autorização de acesso a pedidos.
+
+O guardião adiciona uma chamada ao modelo antes de cada turno aceito. Para manter essa validação, novas interfaces devem chamar `process_user_message`; chamadas diretas a `get_agent_response` não passam pelo guardião.
 
 ## Testes
 
@@ -120,7 +136,7 @@ Na raiz do projeto, com a `.venv` ativa:
 python -m unittest discover -s tests -v
 ```
 
-Os testes de catálogo usam um SQLite temporário e cobrem listagem completa, estoque zero, limites explícitos, ordenação por preço, categoria vazia e preservação de filtros SQL. Eles não exigem Ollama nem executam chamadas ao modelo.
+Os testes de catálogo usam um SQLite temporário e cobrem listagem completa, estoque zero, limites explícitos, ordenação por preço, categoria vazia e preservação de filtros SQL. Os testes de conversa verificam isolamento de sessões, gravação única da resposta final, contexto entre turnos e bloqueio antes de executar o agente. Os recursos externos são substituídos nos testes: não é necessário ter o Ollama ativo nem baixar os modelos.
 
 ## Problemas comuns
 
@@ -153,10 +169,13 @@ emporio-musica-agent/
 ├── src/
 │   ├── data_ingestion.py      # CSVs → SQLite; PDF → ChromaDB
 │   ├── agent.py               # Modelo, ferramentas, prompt e recuperação de resposta
+│   ├── guardrails.py          # Classificação de escopo antes das ferramentas
+│   ├── memory.py              # Histórico do agente em memória, por sessão
 │   ├── catalog.py             # Tabelas e totais de catálogo calculados no SQLite
 │   └── app.py                 # Chat Streamlit e formatação de moeda
 ├── tests/
-│   └── test_catalog.py
+│   ├── test_catalog.py
+│   └── test_conversation.py
 ├── requirements.txt
 └── README.md
 ```
