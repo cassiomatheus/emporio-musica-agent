@@ -8,7 +8,7 @@ Assistente em português para consultar instrumentos, preços, estoque, pedidos 
 - **Políticas da loja:** o PDF é dividido em trechos, convertido em embeddings com `sentence-transformers/all-MiniLM-L6-v2` e indexado no ChromaDB. A ferramenta de consulta de políticas recupera os três trechos mais próximos da pergunta.
 - **Modelo:** o `qwen3.5:9b`, via `ChatOllama`, decide quais ferramentas consultar e prepara a resposta. O código usa `langchain-classic` para `AgentExecutor` e `create_tool_calling_agent`.
 - **Memória e guardião:** `process_user_message` verifica o escopo antes de executar as ferramentas. `RunnableWithMessageHistory` mantém as mensagens aceitas e as respostas finais por ID de sessão.
-- **Interface:** o Streamlit gera um ID exclusivo por sessão, mantém as mensagens para exibição e protege os símbolos de moeda da interpretação como fórmulas LaTeX.
+- **Interface:** o Streamlit gera um ID exclusivo por sessão, mantém as mensagens para exibição, protege os símbolos de moeda da interpretação como fórmulas LaTeX e separa subtítulos de itens numerados que tenham vindo na mesma linha.
 
 SQLite e ChromaDB mantêm os dados no diretório do projeto. Os modelos são baixados inicialmente; a inferência do Qwen é feita pelo Ollama local.
 
@@ -97,12 +97,30 @@ python -m streamlit run src/app.py
 
 Abra o endereço exibido no terminal, normalmente `http://localhost:8501`. Para encerrar, pressione `Ctrl+C`. Para reiniciar após alterações, execute o mesmo comando novamente.
 
+Após modificar `agent.py`, `guardrails.py` ou `memory.py`, pare o servidor com `Ctrl+C` e inicie-o novamente para recarregar os módulos e a configuração do classificador. Esse reinício perde a memória em RAM; selecione novamente o produto antes de testar perguntas de continuação. Não é necessário repetir a ingestão quando apenas o código de conversa mudar.
+
 Exemplos de perguntas:
 
 - “Liste todos os violões ativos no catálogo, com preço e disponibilidade.”
 - “Quais são os três violões mais baratos em estoque?”
 - “Qual é a política de trocas por defeito?”
 - “Quais são as condições de frete para Campo Grande?”
+
+## Teste manual do fluxo de compra
+
+Use **Nova conversa** e envie as mensagens na mesma sessão, selecionando um produto encontrado na consulta inicial:
+
+| Etapa | Exemplo de mensagem | Comportamento esperado |
+| --- | --- | --- |
+| Consultar produtos | “Quais violões estão disponíveis?” | Consultar o SQLite e informar preço e estoque. |
+| Selecionar um produto | “Tenho interesse no [nome do produto].” | Manter o produto no contexto da conversa. |
+| Perguntar sobre parcelamento | “Posso parcelar ele até quantas vezes?” | O guardião permite a pergunta; o agente consulta as políticas de pagamento. |
+| Reformular a pergunta | “Posso parcelar ele de quantas vezes?” | A reformulação continua no escopo e preserva o contexto. |
+| Consultar entrega | “Qual é o valor do frete?” | O guardião permite a pergunta; o agente consulta as políticas de frete e pede o destino se necessário. |
+
+Perguntas sobre pagamento, parcelas e frete também estão no escopo sem um produto previamente selecionado. Nesse caso, o agente deve solicitar os dados que faltarem para responder às condições específicas. As respostas comerciais devem se basear no PDF, em vez de inventar valores ou condições.
+
+Como verificação de bloqueio, uma pergunta como “Escreva código Python para calcular o frete” continua fora do escopo. Mencionar “frete” ou “parcelamento” não libera automaticamente qualquer pedido.
 
 ## Regras de catálogo e resposta
 
@@ -114,19 +132,31 @@ Para consultas SQL completas de categoria reconhecidas por `src/catalog.py`, a t
 
 Se o agente retornar texto vazio, o código tenta gerar uma resposta novamente a partir dos resultados das ferramentas. Se a segunda tentativa também vier vazia, o chat exibe um erro.
 
+Na exibição, `chat_markdown` em `src/app.py` escapa símbolos `$` que ainda não estejam escapados e separa subtítulos em negrito terminados em dois-pontos do primeiro produto numerado na mesma linha. Essa formatação também é aplicada ao reexibir o histórico, preservando o texto original armazenado. O prompt orienta o uso de subtítulos em linhas próprias e descrições indentadas; a interface não completa nomes ou informações que o modelo tenha deixado incompletos.
+
 ## Memória e guardião
 
 A entrada principal do chat é `process_user_message(user_input, session_id)`, definida em `src/agent.py` e chamada por `src/app.py`:
 
 1. A interface cria um UUID por sessão e reutiliza esse ID nas mensagens seguintes. IDs fixos compartilhariam a memória entre usuários.
-2. `src/guardrails.py` classifica a pergunta com o mesmo modelo do agente, considerando até quatro mensagens anteriores, com até 1.200 caracteres por mensagem. Esse contexto é enviado como dados JSON, separado das instruções do classificador. Parcelamento, pagamentos, frete, políticas da loja e continuações de conversa estão no escopo permitido, mesmo quando o cliente usa “ele” ou “esse”. Só a classificação exata `PERMITIDA` libera o agente. Uma saída inválida é tentada novamente; se a falha persistir, a interface informa o erro de validação, em vez de recusar a pergunta como fora de escopo.
+2. `src/guardrails.py` classifica apenas a pergunta atual, usando até quatro mensagens anteriores como contexto, com até 1.200 caracteres por mensagem. A entrada e o histórico são enviados como dados JSON, separados das instruções do classificador. O guardião usa o mesmo `model_name` do agente, com `reasoning=False`, `num_ctx=8192` e `num_predict=64`.
 3. Para entradas aceitas, `RunnableWithMessageHistory` fornece o histórico a `get_agent_response`, que mantém as correções de catálogo e a recuperação de respostas vazias.
 4. A memória registra uma única vez a pergunta e a resposta final efetivamente exibida, incluindo a tabela corrigida do catálogo. Perguntas bloqueadas e turnos com falha não são gravados na memória do agente; as mensagens exibidas continuam no histórico visual da interface.
 5. O botão **Nova conversa** limpa a memória da sessão atual, reinicia o histórico visual e gera outro ID.
 
 `src/memory.py` mantém os históricos em um dicionário no processo Python. Reiniciar o servidor perde essa memória, e uma nova sessão do Streamlit recebe outro ID. Não há persistência em Redis ou banco de dados. A classificação do guardião depende do modelo; a configuração atual não representa autenticação de clientes nem autorização de acesso a pedidos.
 
-O guardião adiciona uma chamada ao modelo antes de cada turno aceito. Para manter essa validação, novas interfaces devem chamar `process_user_message`; chamadas diretas a `get_agent_response` não passam pelo guardião.
+O retorno do guardião é tratado da seguinte forma, após remover espaços externos e converter para maiúsculas:
+
+| Classificação | Ação |
+| --- | --- |
+| `PERMITIDA` | Executar o agente com o histórico da sessão. |
+| `BLOQUEADA` | Exibir a recusa de escopo, sem executar o agente nem gravar o turno em sua memória. |
+| Qualquer outra saída, inclusive vazia ou ambígua | Repetir a classificação uma vez, reforçando o formato. Se continuar inválida, informar “Não foi possível validar sua pergunta neste momento”, sem liberar o agente. |
+
+Uma falha de formato do classificador não é apresentada como uma recusa por assunto fora do escopo. Cada saída inválida gera um aviso no terminal, sem registrar o texto da pergunta nesse aviso.
+
+O guardião adiciona uma chamada ao modelo por pergunta, ou duas se a primeira classificação vier em formato inválido. Para manter essa validação, novas interfaces devem chamar `process_user_message`; chamadas diretas a `get_agent_response` não passam pelo guardião.
 
 ## Testes
 
@@ -136,7 +166,11 @@ Na raiz do projeto, com a `.venv` ativa:
 python -m unittest discover -s tests -v
 ```
 
-Os testes de catálogo usam um SQLite temporário e cobrem listagem completa, estoque zero, limites explícitos, ordenação por preço, categoria vazia e preservação de filtros SQL. Os testes de conversa verificam isolamento de sessões, gravação única da resposta final, contexto entre turnos e bloqueio antes de executar o agente. Os recursos externos são substituídos nos testes: não é necessário ter o Ollama ativo nem baixar os modelos.
+Os testes de catálogo usam um SQLite temporário e cobrem listagem completa, estoque zero, limites explícitos, ordenação por preço, categoria vazia e preservação de filtros SQL.
+
+Os testes de conversa cobrem isolamento de sessões, gravação única da resposta final, contexto entre turnos, bloqueio antes de executar o agente e continuidade do fluxo de compra com as perguntas de parcelamento e frete. Também verificam o envio limitado do histórico em JSON, a nova tentativa após uma classificação inválida e a distinção entre recusa de escopo e erro de validação.
+
+Os recursos externos são substituídos nos testes: não é necessário ter o Ollama ativo nem baixar os modelos. Esses testes verificam a orquestração; o teste manual do fluxo de compra verifica as respostas produzidas pelo modelo e a consulta às políticas.
 
 ## Problemas comuns
 
@@ -145,10 +179,13 @@ Os testes de catálogo usam um SQLite temporário e cobrem listagem completa, es
 | `externally-managed-environment` | Ative `.venv` e use `python -m pip install -r requirements.txt`. |
 | `No module named ...` | Confira o Python ativo com `which python` e reinstale as dependências na `.venv`. Os imports de agentes legados usam `langchain_classic`. |
 | Falha de conexão com Ollama ou modelo não encontrado | Confira se o servidor está ativo e se `ollama list` mostra o mesmo modelo configurado em `src/agent.py`. |
+| Perguntas de parcelamento ou frete recusadas como fora de escopo | Essas perguntas fazem parte do atendimento. Reinicie o servidor para recarregar o guardião atualizado e repita o fluxo na mesma sessão após selecionar o produto. |
+| “Não foi possível validar sua pergunta neste momento” | O classificador retornou uma saída inválida em duas tentativas. Confira os avisos do guardião no terminal e a disponibilidade do modelo no Ollama antes de tentar novamente. |
 | Arquivo de dados não encontrado | Execute na raiz e confira os nomes completos, incluindo espaços e o acento em `políticas_da_loja.pdf`. |
 | Banco ou políticas sem resultados | Confira os logs da ingestão e os arquivos gerados em `db/` e `vectorstore/`. |
 | Aviso de requisições sem `HF_TOKEN` | O modelo público pode ser baixado sem token, sujeito aos limites do Hugging Face. O aviso não indica, por si só, falha na execução. |
 | Símbolos de moeda e negrito desformatados | A interface escapa `$` ao renderizar mensagens novas e o histórico. Reinicie a aplicação para carregar a versão atualizada. |
+| Subtítulo e primeiro produto na mesma linha | A interface separa o padrão de subtítulo em negrito seguido de item numerado. Reinicie a aplicação para carregar a correção. |
 
 ## Estrutura
 
