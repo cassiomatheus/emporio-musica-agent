@@ -87,3 +87,33 @@ Foi utilizado o **OpenAI Codex**, com acesso ao repositório e ao terminal, como
 A IA também auxiliou na redação deste README. As verificações cobrem os casos exercitados e não representam garantia de acerto em todos os cenários de atendimento.
 
 Detalhes de arquitetura, módulos, solução de problemas e operação estão no [guia completo](README_full.md).
+
+## Estrutura
+
+```text
+emporio-musica-agent/
+├── data/
+│   ├── desafio_tecnico_ai_eng - products.csv
+│   ├── desafio_tecnico_ai_eng - orders.csv
+│   ├── desafio_tecnico_ai_eng - customers.csv
+│   ├── desafio_tecnico_ai_eng - categories.csv
+│   ├── desafio_tecnico_ai_eng - order_items.csv
+│   ├── desafio_tecnico_ai_eng - promotions.csv
+│   ├── políticas_da_loja.pdf
+│   └── processado/            # Arquivos auxiliares fora do fluxo de ingestão
+├── db/
+│   └── emporio.db             # SQLite gerado pela ingestão
+├── vectorstore/               # Índice persistente do ChromaDB
+├── src/
+│   ├── data_ingestion.py      # CSVs → SQLite; PDF → ChromaDB
+│   ├── agent.py               # Modelo, ferramentas, prompt e recuperação de resposta
+│   ├── guardrails.py          # Classificação de escopo antes das ferramentas
+│   ├── memory.py              # Histórico do agente em memória, por sessão
+│   ├── catalog.py             # Tabelas e totais de catálogo calculados no SQLite
+│   └── app.py                 # Chat Streamlit e formatação de moeda
+├── tests/
+│   ├── test_catalog.py
+│   └── test_conversation.py
+├── requirements.txt
+└── README.md
+```
