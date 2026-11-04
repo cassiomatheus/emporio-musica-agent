@@ -156,13 +156,13 @@ Na exibição, `chat_markdown` em `src/app.py` escapa símbolos `$` que ainda n�
 
 A entrada principal do chat é `process_user_message(user_input, session_id)`, definida em `src/agent.py` e chamada por `src/app.py`:
 
-1. A interface cria um UUID por sessão e reutiliza esse ID nas mensagens seguintes. IDs fixos compartilhariam a memória entre usuários.
+1. A interface gera UUID4 por sessão e reutiliza esse código nas mensagens seguintes. A retomada exige 32 caracteres hexadecimais e versão UUID4, validados no backend antes de buscar o histórico. O campo de retomada é mascarado; o código deve ser tratado como uma credencial privada.
 2. `src/guardrails.py` classifica apenas a pergunta atual, usando até quatro mensagens anteriores como contexto, com até 1.200 caracteres por mensagem. A entrada e o histórico são enviados como dados JSON, separados das instruções do classificador. O guardião usa o mesmo `model_name` do agente, com `reasoning=False`, `num_ctx=8192` e `num_predict=64`.
 3. Para entradas aceitas, `RunnableWithMessageHistory` fornece o histórico a `get_agent_response`, que mantém as correções de catálogo e a recuperação de respostas vazias.
 4. A memória registra uma única vez a pergunta e a resposta final efetivamente exibida, incluindo a tabela corrigida do catálogo. Perguntas bloqueadas e turnos com falha não são gravados na memória do agente; as mensagens exibidas continuam no histórico visual da interface.
 5. O botão **Nova conversa** apaga a memória persistida da sessão atual, reinicia o histórico visual e gera outro ID. Para continuar uma conversa anterior, informe seu código em **Retomar conversa** na barra lateral.
 
-`src/memory.py` usa SQLChatMessageHistory com SQLite em db/chat_history.db, separado do banco comercial. Os históricos persistem após reiniciar, mas a interface precisa do mesmo código para recuperar uma sessão. A ingestão não apaga esse banco. A classificação do guardião depende do modelo; a configuração atual não representa autenticação de clientes nem autorização de acesso a pedidos.
+`src/memory.py` usa SQLChatMessageHistory com SQLite em db/chat_history.db, separado do banco comercial. Os históricos persistem após reiniciar, mas a interface precisa do mesmo código para recuperar uma sessão. A ingestão não apaga esse banco. A classificação do guardião depende do modelo; o código bearer não representa autenticação de identidade nem autorização por titularidade de pedidos. Quem possui o código válido pode retomar a conversa; não há expiração ou revogação específica.
 
 O retorno do guardião é tratado da seguinte forma, após remover espaços externos e converter para maiúsculas:
 
@@ -170,12 +170,18 @@ O retorno do guardião é tratado da seguinte forma, após remover espaços exte
 | --- | --- |
 | `PERMITIDA` | Executar o agente com o histórico da sessão. |
 | `BLOQUEADA` | Exibir a recusa de escopo, sem executar o agente nem gravar o turno em sua memória. |
-| Saída vazia ou ambígua | Repetir uma vez. Se continuar inválida, registrar PARSE_ERROR com fallback=true e liberar o agente (fail-open). |
-| Exceção na chamada do classificador | Registrar EXCEPTION e liberar o agente (fail-open). |
+| Saída vazia ou ambígua | Repetir uma vez. Se continuar inválida, registrar PARSE_ERROR com fallback=false, decision=BLOCKED e não executar o agente. |
+| Exceção na chamada do classificador | Registrar EXCEPTION com decision=BLOCKED e não executar o agente. |
 
-As falhas não são apresentadas como recusa por assunto fora de escopo. O arquivo guardrail_metrics.log registra eventos SAFE, BLOCKED, PARSE_ERROR e EXCEPTION com request_id, latency_ms, attempt e fallback, sem o texto das conversas. Há rotação de até 1 MB por arquivo e dois backups. O fallback não garante que o agente principal recusará toda entrada indevida. Os eventos medem formato e disponibilidade; não medem acerto semântico sem dados de referência.
+As falhas não são apresentadas como recusa por assunto fora de escopo. O arquivo guardrail_metrics.log registra eventos SAFE, BLOCKED, PARSE_ERROR e EXCEPTION com request_id, latency_ms, attempt e fallback, sem o texto das conversas. Há rotação de até 1 MB por arquivo e dois backups. A falha do classificador não libera o agente. Uma classificação PERMITIDA incorreta ainda é possível; as restrições SQL são independentes do modelo. Os eventos medem formato e disponibilidade; não medem acerto semântico sem dados de referência.
 
 O guardião adiciona uma chamada ao modelo por pergunta, ou duas se a primeira classificação vier em formato inválido. Para manter essa validação, novas interfaces devem chamar `process_user_message`; chamadas diretas a `get_agent_response` não passam pelo guardião.
+
+## Restrições SQL
+
+A conexão de leitura do agente está em src/sql_access.py. O arquivo comercial é aberto com mode=ro, query_only e um authorizer SQLite. As únicas tabelas permitidas são produtos, pedidos e promocoes; clientes e outros bancos/tabelas não podem ser lidos nem por consultas diretas. Pedidos expõe apenas order_id, order_date, status, total_brl e estimated_delivery. Não são enviados exemplos de registros ao modelo. Escrita, DDL, ATTACH, PRAGMA e funções fora da lista permitida são negados.
+
+include_tables limita o esquema mostrado pelo LangChain; não é, sozinho, autorização de SQL. A restrição efetiva fica na conexão. A ingestão continua usando sua conexão de escrita separada, e o histórico usa chat_history.db; essas permissões não são concedidas ao LLM.
 
 ## Promoções e monitoramento
 
@@ -193,9 +199,11 @@ python -m unittest discover -s tests -v
 
 Os testes de catálogo usam um SQLite temporário e cobrem listagem completa, estoque zero, limites explícitos, ordenação por preço, categoria vazia e preservação de filtros SQL.
 
-Os testes de conversa cobrem isolamento de sessões, gravação única da resposta final, contexto entre turnos, bloqueio antes de executar o agente e continuidade do fluxo de compra com as perguntas de parcelamento e frete. Também verificam o envio limitado do histórico em JSON, a nova tentativa após uma classificação inválida e a distinção entre recusa explícita e fallback fail-open. Testes adicionais verificam promoções ativas sem acúmulo, persistência e retomada na interface e sincronização real do ChromaDB em processos separados, usando embeddings de teste sem downloads. A cobertura da ingestão inclui inclusão/atualização sem duplicatas, preservação de linhas ausentes e de outras tabelas, adição de colunas, migração de PK com índices/triggers, rollback em conflitos e preservação de outras fontes e do diretório vetorial.
+Os testes de conversa cobrem isolamento de sessões, gravação única da resposta final, contexto entre turnos, bloqueio antes de executar o agente e continuidade do fluxo de compra com as perguntas de parcelamento e frete. Também verificam o envio limitado do histórico em JSON, a nova tentativa após uma classificação inválida e a distinção entre recusa explícita e bloqueio fail-closed. Testes adicionais verificam promoções ativas sem acúmulo, persistência e retomada na interface e sincronização real do ChromaDB em processos separados, usando embeddings de teste sem downloads. A cobertura da ingestão inclui inclusão/atualização sem duplicatas, preservação de linhas ausentes e de outras tabelas, adição de colunas, migração de PK com índices/triggers, rollback em conflitos e preservação de outras fontes e do diretório vetorial.
 
 Os recursos externos são substituídos nos testes: não é necessário ter o Ollama ativo nem baixar os modelos. Esses testes verificam a orquestração; o teste manual do fluxo de compra verifica as respostas produzidas pelo modelo e a consulta às políticas.
+
+As dez interações reais do modelo estão documentadas em [AVALIACAO_QWEN.md](AVALIACAO_QWEN.md), gerado por `python scripts/evaluate_qwen.py`. O relatório registra respostas e ferramentas observadas, sem simular resultados do Ollama.
 
 ## Problemas comuns
 
@@ -205,7 +213,7 @@ Os recursos externos são substituídos nos testes: não é necessário ter o Ol
 | `No module named ...` | Confira o Python ativo com `which python` e reinstale as dependências na `.venv`. Os imports de agentes legados usam `langchain_classic`. |
 | Falha de conexão com Ollama ou modelo não encontrado | Confira se o servidor está ativo e se `ollama list` mostra o mesmo modelo configurado em `src/agent.py`. |
 | Perguntas de parcelamento ou frete recusadas como fora de escopo | Essas perguntas fazem parte do atendimento. Reinicie o servidor para recarregar o guardião atualizado e repita o fluxo na mesma sessão após selecionar o produto. |
-| PARSE_ERROR ou EXCEPTION em guardrail_metrics.log | O guardião aplicou fallback fail-open. Verifique o Ollama e a contagem de eventos; uma falha do modelo principal ainda pode impedir a resposta. |
+| PARSE_ERROR ou EXCEPTION em guardrail_metrics.log | O guardião aplicou bloqueio fail-closed. Verifique o Ollama e a contagem de eventos; uma falha do modelo principal ainda pode impedir a resposta. |
 | Histórico não aparece após reiniciar | Informe o código salvo em **Retomar conversa**. Uma nova sessão recebe outro código; o arquivo SQLite preserva os históricos existentes. |
 | Arquivo de dados não encontrado | Execute na raiz e confira os nomes completos, incluindo espaços e o acento em `políticas_da_loja.pdf`. |
 | Banco ou políticas sem resultados | Confira os logs da ingestão e os arquivos gerados em `db/` e `vectorstore/`. |
@@ -234,14 +242,19 @@ emporio-musica-agent/
 │   ├── data_ingestion.py      # CSVs → upsert SQL; PDF → sincronização por hashes
 │   ├── agent.py               # Modelo, ferramentas, prompt e recuperação de resposta
 │   ├── guardrails.py          # Classificação de escopo antes das ferramentas
-│   ├── memory.py              # Histórico persistente em SQLite, por sessão
+│   ├── memory.py              # Histórico persistente e validação UUID4
+│   ├── sql_access.py          # SQL de leitura e autorização de tabelas/colunas
 │   ├── catalog.py             # Tabelas e totais de catálogo calculados no SQLite
 │   └── app.py                 # Chat Streamlit e formatação de moeda
 ├── tests/
 │   ├── test_catalog.py
 │   ├── test_conversation.py
 │   ├── test_ingestion.py
-│   └── test_app.py
+│   ├── test_app.py
+│   └── test_sql_access.py
+├── scripts/
+│   └── evaluate_qwen.py
+├── AVALIACAO_QWEN.md
 ├── requirements.txt
 └── README.md
 ```

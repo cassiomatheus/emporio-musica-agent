@@ -1,11 +1,22 @@
 """Histórico persistente e isolado por sessão, separado do banco comercial."""
 
 from pathlib import Path
+import re
+from uuid import UUID, RFC_4122
 
 from langchain_community.chat_message_histories import SQLChatMessageHistory
 from langchain_core.chat_history import BaseChatMessageHistory
 from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
+
+
+def normalize_session_id(session_id: str) -> str:
+    if not isinstance(session_id, str) or not re.fullmatch(r"[0-9a-fA-F]{32}", session_id.strip()):
+        raise ValueError("Código de conversa inválido.")
+    value = UUID(hex=session_id.strip())
+    if value.version != 4 or value.variant != RFC_4122:
+        raise ValueError("Código de conversa inválido.")
+    return value.hex
 
 
 class MemoryManager:
@@ -17,8 +28,7 @@ class MemoryManager:
         self.engine = create_engine(self.db_path)
 
     def get_session_history(self, session_id: str) -> BaseChatMessageHistory:
-        if not session_id.strip():
-            raise ValueError("O identificador da sessão não pode ficar vazio.")
+        session_id = normalize_session_id(session_id)
         return SQLChatMessageHistory(session_id=session_id, connection=self.engine)
 
     def clear_memory(self, session_id: str):

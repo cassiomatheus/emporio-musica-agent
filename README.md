@@ -125,15 +125,15 @@ Antes de chamar o agente, a função `process_user_message` executa um **guardi�
 
 Perguntas sobre instrumentos e atendimento da loja são encaminhadas; solicitações externas ao domínio, como produção de código ou assuntos sem relação com a loja, são recusadas educadamente.
 
-Se o classificador devolver um formato inválido, o sistema tenta novamente uma vez. Se a saída continuar inválida, ou ocorrer uma exceção de conexão, o fallback fail-open permite a passagem para o agente e registra o evento. Uma classificação explícita BLOQUEADA continua sendo recusada. Esse fallback prioriza continuidade, mas as instruções do agente não garantem contenção de requisições indevidas.
+O guardião opera em **fail-closed**: apenas a classificação exata PERMITIDA libera o agente. Uma saída inválida é tentada novamente uma vez; se persistir, ou houver exceção/indisponibilidade do classificador, a pergunta é bloqueada e o evento é registrado. A interface apresenta uma mensagem amigável de validação, sem executar as ferramentas nem expor a exceção interna.
 
 O histórico do atendimento é separado por identificador de sessão e persiste em db/chat_history.db usando SQLChatMessageHistory. O código da conversa pode ser usado na barra lateral para retomar as mensagens e o contexto após reiniciar. A opção **Nova conversa** apaga o histórico da sessão atual.
 
 **Limite importante:** esse guardião controla assunto, não identidade nem permissões de acesso.
 
-A versão atual não autentica clientes, não implementa autorização específica para visualizar pedidos e ainda não impõe uma restrição dedicada de somente leitura às ferramentas SQL. Portanto, não seria correto apresentar o sistema como preparado para consultar dados pessoais de clientes em produção.
+As ferramentas comerciais usam uma conexão SQLite aberta com mode=ro e query_only. Além de include_tables, um authorizer permite somente leituras de produtos, pedidos e promocoes, bloqueando escrita, DDL, ATTACH, PRAGMA e funções não autorizadas. A tabela clientes não fica disponível, inclusive para consultas SQL diretas. Em pedidos, apenas order_id, order_date, status, total_brl e estimated_delivery são acessíveis; customer_id, notes e outros campos ficam bloqueados. O esquema enviado ao LLM não contém amostras de registros.
 
-Antes de qualquer uso real, seria necessário acrescentar autenticação, autorização por titularidade, privilégios mínimos no banco e revisão da exposição de detalhes técnicos nas mensagens de erro. O classificador por LLM também não constitui proteção comprovada contra todas as formas de prompt injection.
+A criação e a retomada de conversas exigem UUID4 em formato hexadecimal de 32 caracteres, validado também no backend. O código é uma credencial bearer: quem o conhece pode acessar aquele histórico. Isso reduz adivinhação, mas não substitui autenticação, expiração, revogação e autorização por titularidade. A consulta de status de pedidos ainda não valida a identidade do solicitante; o protótipo não deve ser apresentado como pronto para produção. O classificador por LLM também não é uma proteção comprovada contra toda forma de prompt injection.
 
 Eventos SAFE, BLOCKED, PARSE_ERROR e EXCEPTION são registrados em guardrail_metrics.log, com ID de requisição, latência, tentativa e indicador de fallback, sem o texto integral das conversas. O arquivo tem rotação. Esses dados medem decisões e falhas de formato/operação; a taxa de acerto semântico exige perguntas rotuladas para comparação.
 
@@ -143,25 +143,10 @@ Eventos SAFE, BLOCKED, PARSE_ERROR e EXCEPTION são registrados em guardrail_met
 
 - A ingestão carrega produtos, pedidos, clientes e promoções; categorias e itens de pedidos ainda não são importados. O SQL usa staging temporário e upsert por chave primária, preservando registros ausentes do CSV e outras tabelas. IDs nulos ou duplicados interrompem a carga. No ChromaDB, a sincronização por fonte não é uma transação conjunta com o SQLite; uma interrupção pode exigir repetir a carga.
 - O modelo pode errar SQL, classificação de escopo ou interpretação das políticas. A correção determinística de catálogo cobre apenas consultas simples reconhecidas; não valida toda resposta gerada. A qualidade do retrieval em português ainda não foi avaliada sistematicamente.
-- A memória persiste em SQLite, mas a retomada depende do código da conversa. Não há autenticação por cliente, autorização de acesso a pedidos ou restrição dedicada das ferramentas SQL a consultas de leitura.
+- A memória persiste em SQLite e a retomada depende do código UUID4 privado. Ainda faltam autenticação de identidade, expiração/revogação de códigos e autorização por titularidade para pedidos. As ferramentas SQL já são somente leitura e não acessam a tabela clientes.
 - O desempenho depende do hardware; o guardião acrescenta uma chamada por pergunta, com nova tentativa se o formato for inválido. As dependências não estão integralmente fixadas, e as APIs de memória utilizadas têm avisos de descontinuação na versão instalada.
 
-**Com mais tempo:** integrar as fontes restantes e versionar as políticas com publicação atômica; avaliar embeddings multilíngues e reranking com perguntas de referência; ampliar testes de fluxo e precisão das respostas; gerenciar a retenção do histórico, implementar controles de acesso e SQL somente leitura; fixar versões e migrar as APIs de memória legadas.
-
-## Testes e validação
-
-Com a `.venv` ativa, execute sem exigir o Ollama em funcionamento:
-
-```bash
-python -m pip check
-python -m unittest discover -s tests -v
-```
-
-A suíte atual contém **38 testes**. A cobertura inclui upsert de registros novos e existentes, preservação de linhas ausentes e de outras tabelas, carga parcial de colunas, migração de chaves primárias, manutenção de índices e triggers e rollback em conflitos. No ChromaDB, verifica IDs estáveis, atualização do conteúdo, preservação de outras fontes e ausência de exclusão dos trechos anteriores quando os embeddings falham.
-
-Também são verificados descontos ativos sem acúmulo, memória persistente por sessão, retomada na interface, guardião e fallback. Os testes usam SQLite temporário, ChromaDB local com embeddings de teste e substituições das chamadas ao LLM; não substituem a avaliação das respostas do modelo real.
-
-Na validação com a base do projeto, os IDs anteriores foram preservados, as quatro chaves primárias foram confirmadas e a integridade do SQLite passou. A segunda ingestão sem alterações manteve os 20 trechos do manual, com zero gravações e zero remoções no índice.
+**Com mais tempo:** integrar as fontes restantes e versionar as políticas com publicação atômica; avaliar embeddings multilíngues e reranking com perguntas de referência; ampliar testes de fluxo e precisão das respostas; gerenciar a retenção do histórico, implementar autenticação e autorização por titularidade; fixar versões e migrar as APIs de memória legadas.
 
 ## Uso do OpenAI Codex no desenvolvimento
 
@@ -176,6 +161,8 @@ As verificações documentadas incluem `unittest`, testes da interface com Strea
 O uso de IA acelerou tarefas repetitivas e a investigação de erros, mas o código gerado precisa ser compreendido e revisado antes da entrega.
 
 Minha responsabilidade é conseguir explicar as decisões adotadas, reproduzir as funcionalidades essenciais, identificar limitações e distinguir comportamentos comprovados de hipóteses ainda não avaliadas. Não apresento a utilização do Codex, isoladamente, como garantia de qualidade da solução.
+
+As dez perguntas executadas com o Ollama real e suas respostas estão em [AVALIACAO_QWEN.md](AVALIACAO_QWEN.md). Para repetir essa avaliação, com o Ollama ativo e os dados preparados, execute `python scripts/evaluate_qwen.py`. Essa avaliação empírica complementa os testes automatizados e documenta os resultados efetivamente observados.
 
 Detalhes de arquitetura, módulos, solução de problemas e operação estão no [guia completo](README_full.md).
 
@@ -200,14 +187,19 @@ emporio-musica-agent/
 │   ├── data_ingestion.py      # CSVs → upsert SQL; PDF → sincronização por hashes
 │   ├── agent.py               # Modelo, ferramentas, prompt e recuperação de resposta
 │   ├── guardrails.py          # Classificação de escopo antes das ferramentas
-│   ├── memory.py              # Histórico persistente em SQLite, por sessão
+│   ├── memory.py              # Histórico persistente e validação UUID4
+│   ├── sql_access.py          # SQL de leitura e autorização de tabelas/colunas
 │   ├── catalog.py             # Tabelas e totais de catálogo calculados no SQLite
 │   └── app.py                 # Chat Streamlit e formatação de moeda
 ├── tests/
 │   ├── test_catalog.py
 │   ├── test_conversation.py
 │   ├── test_ingestion.py
-│   └── test_app.py
+│   ├── test_app.py
+│   └── test_sql_access.py
+├── scripts/
+│   └── evaluate_qwen.py        # Dez cenários com o Ollama real
+├── AVALIACAO_QWEN.md           # Transcrições e evidências da avaliação
 ├── requirements.txt
 └── README.md
 ```

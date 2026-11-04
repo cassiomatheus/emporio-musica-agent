@@ -8,13 +8,14 @@ import unittest
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
+from uuid import uuid4, uuid1
 
 from langchain_core.messages import AIMessage, HumanMessage
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import guardrails
-from memory import MemoryManager
+from memory import MemoryManager, normalize_session_id
 
 
 class MemoryTests(unittest.TestCase):
@@ -22,29 +23,37 @@ class MemoryTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.database = f"sqlite:///{Path(directory.name) / 'history.db'}"
+        self.first_id, self.second_id = uuid4().hex, uuid4().hex
 
     def test_sessions_are_isolated_and_can_be_cleared(self):
         manager = MemoryManager(self.database)
         self.addCleanup(manager.close)
-        first = manager.get_session_history("first")
+        first = manager.get_session_history(self.first_id)
         first.add_user_message("Procuro um violão")
-        second = manager.get_session_history("second")
+        second = manager.get_session_history(self.second_id)
         second.add_user_message("Procuro uma guitarra")
-        self.assertEqual(first.messages, manager.get_session_history("first").messages)
-        manager.clear_memory("first")
+        self.assertEqual(first.messages, manager.get_session_history(self.first_id).messages)
+        manager.clear_memory(self.first_id)
         self.assertEqual(first.messages, [])
         self.assertEqual(second.messages[0].content, "Procuro uma guitarra")
 
     def test_history_survives_a_new_manager(self):
         manager = MemoryManager(self.database)
-        manager.get_session_history('persisted').add_messages([
+        manager.get_session_history(self.first_id).add_messages([
             HumanMessage(content='Procuro um violão'), AIMessage(content='Qual modelo?')
         ])
         manager.close()
         restored = MemoryManager(self.database)
         self.addCleanup(restored.close)
-        self.assertEqual([m.content for m in restored.get_session_history('persisted').messages],
+        self.assertEqual([m.content for m in restored.get_session_history(self.first_id).messages],
                          ['Procuro um violão', 'Qual modelo?'])
+
+    def test_session_codes_require_uuid4_and_normalize_hex(self):
+        code = uuid4().hex
+        self.assertEqual(normalize_session_id(code.upper()), code)
+        for invalid in ('user_123', '1', '0' * 32, uuid1().hex, '', ' '):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                normalize_session_id(invalid)
 
 
 class GuardrailTests(unittest.TestCase):
@@ -80,22 +89,22 @@ class GuardrailTests(unittest.TestCase):
             self.assertTrue(guardrails.check_input_guardrail('Qual é o frete?'))
             self.assertEqual(chain.return_value.invoke.call_count, 2)
 
-    def test_ambiguous_classification_falls_open_after_two_attempts(self):
+    def test_ambiguous_classification_fails_closed_after_two_attempts(self):
         for content in ['NÃO PERMITIDA', 'PERMITIDA ou BLOQUEADA', '']:
             with self.subTest(content=content), patch.object(guardrails, '_guardrail_chain') as chain:
                 chain.return_value.invoke.return_value = AIMessage(content=content)
-                self.assertTrue(guardrails.check_input_guardrail('Posso parcelar?'))
+                self.assertFalse(guardrails.check_input_guardrail('Posso parcelar?'))
                 self.assertEqual(chain.return_value.invoke.call_count, 2)
                 event = json.loads(self.metrics.return_value.log.call_args.args[1])
                 self.assertEqual(event['event'], 'PARSE_ERROR')
-                self.assertTrue(event['fallback'])
+                self.assertFalse(event['fallback'])
 
-    def test_connection_error_falls_open_and_is_logged(self):
+    def test_connection_error_fails_closed_and_is_logged(self):
         with patch.object(guardrails, '_guardrail_chain', side_effect=ConnectionError('local')):
-            self.assertTrue(guardrails.check_input_guardrail('Olá'))
+            self.assertFalse(guardrails.check_input_guardrail('Olá'))
         event = json.loads(self.metrics.return_value.log.call_args.args[1])
         self.assertEqual(event['event'], 'EXCEPTION')
-        self.assertTrue(event['fallback'])
+        self.assertFalse(event['fallback'])
         self.assertEqual(event['error_type'], 'ConnectionError')
 
     def test_explicit_block_is_logged_without_fallback_or_input_text(self):
@@ -125,7 +134,7 @@ class ConversationTests(unittest.TestCase):
         # de recursos externos é substituída para não ler o banco nem os modelos.
         with ExitStack() as stack:
             for target in [
-                "langchain_community.utilities.SQLDatabase.from_uri",
+                "sql_access.create_public_database",
                 "langchain_chroma.Chroma",
                 "langchain_huggingface.HuggingFaceEmbeddings",
                 "langchain_core.tools.create_retriever_tool",
@@ -142,6 +151,7 @@ class ConversationTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         manager = MemoryManager(f"sqlite:///{Path(directory.name) / 'history.db'}")
         self.addCleanup(manager.close)
+        self.ids = {name: uuid4().hex for name in ("a", "b", "purchase")}
         self.patches = ExitStack()
         self.addCleanup(self.patches.close)
         self.patches.enter_context(patch.object(self.agent, 'memory_manager', manager))
@@ -155,38 +165,46 @@ class ConversationTests(unittest.TestCase):
         )
 
     def test_history_saves_final_text_once_and_reaches_the_next_turn(self):
-        self.assertEqual(self.agent.process_user_message("Quero um violão", "a"), "Resposta final corrigida")
-        history = self.agent.memory_manager.get_session_history("a").messages
+        self.assertEqual(self.agent.process_user_message("Quero um violão", self.ids["a"]), "Resposta final corrigida")
+        history = self.agent.memory_manager.get_session_history(self.ids["a"]).messages
         self.assertEqual([m.content for m in history], ["Quero um violão", "Resposta final corrigida"])
-        self.agent.process_user_message("E o preço dele?", "a")
-        self.assertEqual(len(self.agent.memory_manager.get_session_history('a').messages), 4)
+        self.agent.process_user_message("E o preço dele?", self.ids["a"])
+        self.assertEqual(len(self.agent.memory_manager.get_session_history(self.ids["a"]).messages), 4)
         self.assertEqual(len(self.respond.call_args.args[1]), 2)
         self.assertEqual(self.respond.call_args.args[1][1].content, "Resposta final corrigida")
         self.assertEqual(self.guard.call_args.args[1], self.agent.model_name)
 
     def test_another_session_does_not_receive_the_first_history(self):
-        self.agent.process_user_message("Quero um violão", "a")
-        self.agent.process_user_message("Quero uma guitarra", "b")
+        self.agent.process_user_message("Quero um violão", self.ids["a"])
+        self.agent.process_user_message("Quero uma guitarra", self.ids["b"])
         self.assertEqual(self.respond.call_args.args[1], [])
 
     def test_blocked_input_does_not_reach_tools_or_enter_memory(self):
         self.guard.return_value = False
-        answer = self.agent.process_user_message("Escreva código", "a")
+        answer = self.agent.process_user_message("Escreva código", self.ids["a"])
         self.assertIn("Empório da Música", answer)
         self.respond.assert_not_called()
-        self.assertEqual(self.agent.memory_manager.get_session_history("a").messages, [])
+        self.assertEqual(self.agent.memory_manager.get_session_history(self.ids["a"]).messages, [])
 
     def test_guardrail_failure_does_not_release_the_agent(self):
         self.guard.side_effect = RuntimeError("Ollama indisponível")
         with self.assertRaises(RuntimeError):
-            self.agent.process_user_message("Olá", "a")
+            self.agent.process_user_message("Olá", self.ids["a"])
         self.respond.assert_not_called()
+
+    def test_real_guardrail_connection_failure_returns_friendly_refusal_without_agent(self):
+        with patch.object(self.agent, 'check_input_guardrail', guardrails.check_input_guardrail), \
+                patch.object(guardrails, '_guardrail_chain', side_effect=ConnectionError('indisponível')):
+            answer = self.agent.process_user_message('Qual é o frete?', self.ids['a'])
+        self.assertEqual(answer, self.agent.VALIDATION_REFUSAL)
+        self.respond.assert_not_called()
+        self.assertEqual(self.agent.memory_manager.get_session_history(self.ids['a']).messages, [])
 
     def test_failed_agent_turn_is_not_saved(self):
         self.respond.side_effect = RuntimeError("Falha no agente")
         with self.assertRaises(RuntimeError):
-            self.agent.process_user_message("Olá", "a")
-        self.assertEqual(self.agent.memory_manager.get_session_history("a").messages, [])
+            self.agent.process_user_message("Olá", self.ids["a"])
+        self.assertEqual(self.agent.memory_manager.get_session_history(self.ids["a"]).messages, [])
 
     def test_empty_session_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -194,7 +212,7 @@ class ConversationTests(unittest.TestCase):
         self.guard.assert_not_called()
 
     def test_purchase_followups_pass_guardrail_and_keep_product_context(self):
-        history = self.agent.memory_manager.get_session_history('purchase')
+        history = self.agent.memory_manager.get_session_history(self.ids["purchase"])
         history.add_user_message('Quero comprar o Yamaha C70.')
         history.add_ai_message('O Yamaha C70 está disponível por R$ 849,00.')
         questions = [
@@ -206,7 +224,7 @@ class ConversationTests(unittest.TestCase):
                 patch.object(guardrails, '_guardrail_chain') as chain:
             chain.return_value.invoke.return_value = AIMessage(content='PERMITIDA')
             for question in questions:
-                answer = self.agent.process_user_message(question, 'purchase')
+                answer = self.agent.process_user_message(question, self.ids["purchase"])
                 self.assertEqual(answer, 'Resposta final corrigida')
                 self.assertEqual(self.respond.call_args.args[0], question)
                 self.assertIn('Yamaha C70', self.respond.call_args.args[1][0].content)

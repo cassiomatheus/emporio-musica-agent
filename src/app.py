@@ -1,9 +1,10 @@
 import re
-from uuid import UUID, uuid4
+from uuid import uuid4
+import logging
 
 import streamlit as st
 from agent import process_user_message
-from memory import memory_manager
+from memory import memory_manager, normalize_session_id
 
 
 def chat_markdown(text: str, *, hide_category_codes: bool = False) -> str:
@@ -34,12 +35,12 @@ if "session_id" not in st.session_state:
     st.session_state.session_id = uuid4().hex
 
 with st.sidebar:
-    st.caption("Guarde o código para retomar esta conversa após reiniciar.")
+    st.caption("Código privado: quem o possui pode retomar esta conversa. Guarde-o com cuidado.")
     st.code(st.session_state.session_id, language=None)
-    restore_id = st.text_input("Código de uma conversa anterior", key="restore_id")
+    restore_id = st.text_input("Código de uma conversa anterior", key="restore_id", type="password")
     if st.button("Retomar conversa", key="restore_conversation"):
         try:
-            restored_id = UUID(restore_id.strip()).hex
+            restored_id = normalize_session_id(restore_id)
             saved = memory_manager.get_session_history(restored_id).messages
             if saved:
                 st.session_state.session_id = restored_id
@@ -49,12 +50,20 @@ with st.sidebar:
                 ]
                 st.rerun()
             else:
-                st.warning("Nenhuma conversa encontrada com esse código.")
+                st.warning("Código inválido ou conversa indisponível.")
         except ValueError:
-            st.warning("Informe um código de conversa válido.")
+            st.warning("Código inválido ou conversa indisponível.")
+        except Exception as error:
+            logging.getLogger(__name__).error("Falha ao retomar conversa: %s", type(error).__name__)
+            st.warning("Não foi possível retomar a conversa neste momento.")
 
 if st.button("Nova conversa", key="new_conversation"):
-    memory_manager.clear_memory(st.session_state.session_id)
+    try:
+        memory_manager.clear_memory(st.session_state.session_id)
+    except Exception as error:
+        logging.getLogger(__name__).error("Falha ao limpar conversa: %s", type(error).__name__)
+        st.error("Não foi possível iniciar uma nova conversa neste momento.")
+        st.stop()
     st.session_state.session_id = uuid4().hex
     st.session_state.pop("messages", None)
     st.session_state.pop("chat_history", None)
@@ -86,7 +95,8 @@ if user_input := st.chat_input("Digite sua pergunta..."):
                 )
                 st.markdown(chat_markdown(resposta_agente, hide_category_codes=True))
             except Exception as e:
-                resposta_agente = f"Desculpe, ocorreu um erro interno ao processar sua requisição. Detalhe técnico: {e}"
+                logging.getLogger(__name__).error("Falha no atendimento: %s", type(e).__name__)
+                resposta_agente = "Não foi possível concluir o atendimento neste momento. Tente novamente."
                 st.error(resposta_agente)
                 
     # O RunnableWithMessageHistory já salva os turnos aceitos na memória do agente.
