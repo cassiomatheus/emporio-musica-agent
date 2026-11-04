@@ -1,0 +1,11 @@
+langchain
+langchain-core
+langchain-community
+langchain-ollama
+langchain-chroma
+langchain-huggingface
+streamlit
+pandas
+sqlalchemy
+sentence-transformers
+pypdf
