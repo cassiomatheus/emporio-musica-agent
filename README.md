@@ -35,10 +35,11 @@ Confira os arquivos esperados pela ingestão:
 data/desafio_tecnico_ai_eng - products.csv
 data/desafio_tecnico_ai_eng - orders.csv
 data/desafio_tecnico_ai_eng - customers.csv
+data/desafio_tecnico_ai_eng - promotions.csv
 data/políticas_da_loja.pdf
 ```
 
-Prepare os dados e inicie o chat:
+Com o Streamlit parado, prepare os dados e inicie o chat:
 
 ```bash
 python src/data_ingestion.py
@@ -47,22 +48,36 @@ python -m streamlit run src/app.py
 
 A ingestão gera `db/emporio.db` e `vectorstore/`; o modelo de embeddings é baixado na primeira execução. Confira as mensagens de sucesso das etapas SQLite e PDF. Abra a URL exibida pelo Streamlit, normalmente `http://localhost:8501`.
 
-Em novos terminais, reative `.venv`. Para recarregar alterações nos módulos, encerre com `Ctrl+C` e execute novamente o Streamlit. **Nova conversa** limpa a sessão atual. Não é necessário repetir a ingestão a cada execução do chat.
-
-Para verificar dependências e executar os testes, sem exigir Ollama ativo:
-
-```bash
-python -m pip check
-python -m unittest discover -s tests -v
-```
+Em novos terminais, reative `.venv`. Para recarregar alterações nos módulos, encerre com `Ctrl+C` e execute novamente o Streamlit. O código na barra lateral permite retomar a conversa em **Retomar conversa**, inclusive após reiniciar o servidor. **Nova conversa** apaga o histórico persistido da sessão atual. Não é necessário repetir a ingestão a cada execução do chat.
 
 Teste o contexto na mesma conversa: escolha um produto, pergunte “Posso parcelar ele até quantas vezes?” e depois “Qual é o valor do frete?”. Essas perguntas estão no escopo; as condições devem ser consultadas nas políticas da loja.
 
+### Atualização incremental dos dados
+
+`python src/data_ingestion.py` usa `INSERT ... ON CONFLICT DO UPDATE`, com staging temporário e uma transação para a carga SQL:
+
+| Tabela | Chave primária |
+| --- | --- |
+| `produtos` | `product_id` |
+| `pedidos` | `order_id` |
+| `clientes` | `customer_id` |
+| `promocoes` | `promotion_id` |
+
+O pipeline insere IDs novos, atualiza apenas campos presentes no CSV e mantém linhas que não vierem na carga; um CSV inalterado não provoca atualizações desnecessárias. Ausência no arquivo não significa exclusão ou desativação: envie `status` ou `is_active` atualizado explicitamente. Outras tabelas do banco e `db/chat_history.db` são preservados.
+
+Tabelas antigas sem chave primária são migradas preservando registros, índices e triggers. Se houver chaves nulas ou duplicadas, a migração é abortada, sem escolher silenciosamente qual registro manter. Os nomes reais das colunas (`price_brl`, `category_id`, entre outros) são preservados.
+
+As fontes cadastradas são lidas e validadas antes das alterações. Uma falha durante a carga SQL provoca rollback de todas as tabelas daquela execução. Essa transação não inclui o ChromaDB: se a etapa do PDF falhar, corrija a causa e execute novamente o comando, sem apagar manualmente o banco ou o índice.
+
+Para adicionar outro CSV, cadastre seu arquivo em `SOURCES` e sua chave em `PRIMARY_KEYS`, em `src/data_ingestion.py`. A nova tabela será criada em `emporio.db` sem apagar as existentes; informe suas relações no prompt e reinicie o agente para atualizar o esquema conhecido. O [guia completo](README_full.md) traz um exemplo.
+
 ## Decisões arquiteturais
+
+A escolha das tecnologias priorizou a reutilização de conhecimentos adquiridos em projetos acadêmicos de processamento de dados, modelos de linguagem e recuperação de informações. Isso permitiu concentrar o desenvolvimento na integração entre as fontes e na experiência de atendimento, enquanto o LangChain foi incorporado para simplificar a orquestração das ferramentas.
 
 Optei por uma arquitetura em Python com um agente orientado a ferramentas. Os dados transacionais e as políticas documentais têm características diferentes e, por isso, são tratados por mecanismos distintos. O agente utiliza ferramentas SQL para informações estruturadas e uma ferramenta de recuperação semântica para o PDF. A interface, o histórico de mensagens e a classificação de escopo ficam separados dessas consultas.
 
-**SQLite — dados estruturados.** Escolhi o SQLite por ser leve, relacional e suficiente para o volume dos arquivos fornecidos. Ele permite aplicar filtros, ordenações e contagens sobre produtos, estoque e pedidos sem depender de similaridade semântica ou da memória do LLM. A escolha também aproveitou minha experiência prévia com bancos de dados e processamento de informações no projeto de mestrado. Nesta versão, a ingestão importa produtos, pedidos e clientes; categorias, itens de pedidos e promoções ainda não integram o banco utilizado pelo agente.
+**SQLite — dados estruturados.** Escolhi o SQLite por ser leve, relacional e suficiente para o volume dos arquivos fornecidos. Ele permite aplicar filtros, ordenações e contagens sobre produtos, estoque e pedidos sem depender de similaridade semântica ou da memória do LLM. A escolha também aproveitou minha experiência prévia com bancos de dados e processamento de informações no projeto de mestrado. Nesta versão, a ingestão importa produtos, pedidos, clientes e promoções; categorias e itens de pedidos ainda não integram o banco utilizado pelo agente. As promoções são relacionadas por product_id e apenas is_active = 1 libera o desconto.
 
 **ChromaDB — base vetorial.** Para as políticas da loja, aproveitei minha experiência de pesquisa com representações vetoriais, embeddings e recuperação de informações. O ChromaDB fornece um índice persistente, permitindo reutilizar os embeddings do manual entre execuções. A busca semântica é empregada para localizar trechos pertinentes; ela não substitui consultas exatas ao banco de produtos.
 
@@ -94,9 +109,9 @@ A utilização de embeddings e recuperação vetorial reaproveita conhecimentos 
 
 Essa abordagem possui limitações. A semelhança vetorial não garante que o trecho recuperado contenha todas as condições necessárias para responder. O modelo de embeddings escolhido pode ter limitações para perguntas formuladas em português, e a qualidade da recuperação ainda não foi medida sistematicamente com um conjunto de perguntas e evidências de referência.
 
-Além disso, a ingestão atual pode duplicar fragmentos se executada repetidamente no mesmo índice.
+A ingestão do PDF usa IDs SHA-256 calculados pela fonte e pelo conteúdo de cada trecho. Trechos idênticos reutilizam seus vetores; trechos novos ou alterados são gravados sem apagar vectorstore. Após a gravação, somente versões obsoletas do mesmo PDF são removidas. Documentos de outras fontes são preservados. A primeira carga também migra os IDs aleatórios do índice anterior.
 
-Como próximos passos, avaliaria modelos multilíngues, diferentes configurações de chunking e top-k, além da reconstrução idempotente do índice.
+Como próximos passos, avaliaria modelos multilíngues, diferentes configurações de chunking e top-k, além de versionamento das políticas e publicação atômica de novas versões do índice.
 
 ## Estratégia de prompt
 
@@ -110,9 +125,9 @@ Antes de chamar o agente, a função `process_user_message` executa um **guardi�
 
 Perguntas sobre instrumentos e atendimento da loja são encaminhadas; solicitações externas ao domínio, como produção de código ou assuntos sem relação com a loja, são recusadas educadamente.
 
-Se o classificador devolver um formato inválido, o sistema tenta novamente uma vez. Persistindo a saída inválida, apresenta um erro de validação em vez de liberar automaticamente o agente.
+Se o classificador devolver um formato inválido, o sistema tenta novamente uma vez. Se a saída continuar inválida, ou ocorrer uma exceção de conexão, o fallback fail-open permite a passagem para o agente e registra o evento. Uma classificação explícita BLOQUEADA continua sendo recusada. Esse fallback prioriza continuidade, mas as instruções do agente não garantem contenção de requisições indevidas.
 
-O histórico do atendimento é separado por identificador de sessão e permanece apenas na memória do processo; a opção **Nova conversa** reinicia esse estado.
+O histórico do atendimento é separado por identificador de sessão e persiste em db/chat_history.db usando SQLChatMessageHistory. O código da conversa pode ser usado na barra lateral para retomar as mensagens e o contexto após reiniciar. A opção **Nova conversa** apaga o histórico da sessão atual.
 
 **Limite importante:** esse guardião controla assunto, não identidade nem permissões de acesso.
 
@@ -120,16 +135,33 @@ A versão atual não autentica clientes, não implementa autorização específi
 
 Antes de qualquer uso real, seria necessário acrescentar autenticação, autorização por titularidade, privilégios mínimos no banco e revisão da exposição de detalhes técnicos nas mensagens de erro. O classificador por LLM também não constitui proteção comprovada contra todas as formas de prompt injection.
 
+Eventos SAFE, BLOCKED, PARSE_ERROR e EXCEPTION são registrados em guardrail_metrics.log, com ID de requisição, latência, tentativa e indicador de fallback, sem o texto integral das conversas. O arquivo tem rotação. Esses dados medem decisões e falhas de formato/operação; a taxa de acerto semântico exige perguntas rotuladas para comparação.
+
 ## Limitações e próximos passos
 
 **Limitações conhecidas:**
 
-- A ingestão carrega apenas produtos, pedidos e clientes. Categorias, itens de pedidos e promoções ainda não são importados. Reexecutá-la substitui essas tabelas e pode duplicar trechos no ChromaDB.
+- A ingestão carrega produtos, pedidos, clientes e promoções; categorias e itens de pedidos ainda não são importados. O SQL usa staging temporário e upsert por chave primária, preservando registros ausentes do CSV e outras tabelas. IDs nulos ou duplicados interrompem a carga. No ChromaDB, a sincronização por fonte não é uma transação conjunta com o SQLite; uma interrupção pode exigir repetir a carga.
 - O modelo pode errar SQL, classificação de escopo ou interpretação das políticas. A correção determinística de catálogo cobre apenas consultas simples reconhecidas; não valida toda resposta gerada. A qualidade do retrieval em português ainda não foi avaliada sistematicamente.
-- A memória existe apenas em RAM e se perde ao reiniciar o servidor. Não há autenticação por cliente, autorização de acesso a pedidos ou restrição dedicada das ferramentas SQL a consultas de leitura.
+- A memória persiste em SQLite, mas a retomada depende do código da conversa. Não há autenticação por cliente, autorização de acesso a pedidos ou restrição dedicada das ferramentas SQL a consultas de leitura.
 - O desempenho depende do hardware; o guardião acrescenta uma chamada por pergunta, com nova tentativa se o formato for inválido. As dependências não estão integralmente fixadas, e as APIs de memória utilizadas têm avisos de descontinuação na versão instalada.
 
-**Com mais tempo:** integrar as fontes restantes e tornar a ingestão idempotente; avaliar embeddings multilíngues e reranking com perguntas de referência; ampliar testes de fluxo e precisão das respostas; persistir memória, implementar controles de acesso e SQL somente leitura; fixar versões e migrar as APIs de memória legadas.
+**Com mais tempo:** integrar as fontes restantes e versionar as políticas com publicação atômica; avaliar embeddings multilíngues e reranking com perguntas de referência; ampliar testes de fluxo e precisão das respostas; gerenciar a retenção do histórico, implementar controles de acesso e SQL somente leitura; fixar versões e migrar as APIs de memória legadas.
+
+## Testes e validação
+
+Com a `.venv` ativa, execute sem exigir o Ollama em funcionamento:
+
+```bash
+python -m pip check
+python -m unittest discover -s tests -v
+```
+
+A suíte atual contém **38 testes**. A cobertura inclui upsert de registros novos e existentes, preservação de linhas ausentes e de outras tabelas, carga parcial de colunas, migração de chaves primárias, manutenção de índices e triggers e rollback em conflitos. No ChromaDB, verifica IDs estáveis, atualização do conteúdo, preservação de outras fontes e ausência de exclusão dos trechos anteriores quando os embeddings falham.
+
+Também são verificados descontos ativos sem acúmulo, memória persistente por sessão, retomada na interface, guardião e fallback. Os testes usam SQLite temporário, ChromaDB local com embeddings de teste e substituições das chamadas ao LLM; não substituem a avaliação das respostas do modelo real.
+
+Na validação com a base do projeto, os IDs anteriores foram preservados, as quatro chaves primárias foram confirmadas e a integridade do SQLite passou. A segunda ingestão sem alterações manteve os 20 trechos do manual, com zero gravações e zero remoções no índice.
 
 ## Uso do OpenAI Codex no desenvolvimento
 
@@ -161,18 +193,21 @@ emporio-musica-agent/
 │   ├── políticas_da_loja.pdf
 │   └── processado/            # Arquivos auxiliares fora do fluxo de ingestão
 ├── db/
-│   └── emporio.db             # SQLite gerado pela ingestão
+│   ├── emporio.db             # Dados comerciais, incluindo promoções
+│   └── chat_history.db        # Histórico persistente por sessão
 ├── vectorstore/               # Índice persistente do ChromaDB
 ├── src/
-│   ├── data_ingestion.py      # CSVs → SQLite; PDF → ChromaDB
+│   ├── data_ingestion.py      # CSVs → upsert SQL; PDF → sincronização por hashes
 │   ├── agent.py               # Modelo, ferramentas, prompt e recuperação de resposta
 │   ├── guardrails.py          # Classificação de escopo antes das ferramentas
-│   ├── memory.py              # Histórico do agente em memória, por sessão
+│   ├── memory.py              # Histórico persistente em SQLite, por sessão
 │   ├── catalog.py             # Tabelas e totais de catálogo calculados no SQLite
 │   └── app.py                 # Chat Streamlit e formatação de moeda
 ├── tests/
 │   ├── test_catalog.py
-│   └── test_conversation.py
+│   ├── test_conversation.py
+│   ├── test_ingestion.py
+│   └── test_app.py
 ├── requirements.txt
 └── README.md
 ```

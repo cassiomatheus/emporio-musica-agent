@@ -3,6 +3,7 @@
 import importlib
 import json
 import sys
+import tempfile
 import unittest
 from contextlib import ExitStack
 from pathlib import Path
@@ -17,19 +18,41 @@ from memory import MemoryManager
 
 
 class MemoryTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.database = f"sqlite:///{Path(directory.name) / 'history.db'}"
+
     def test_sessions_are_isolated_and_can_be_cleared(self):
-        manager = MemoryManager()
+        manager = MemoryManager(self.database)
+        self.addCleanup(manager.close)
         first = manager.get_session_history("first")
         first.add_user_message("Procuro um violão")
         second = manager.get_session_history("second")
         second.add_user_message("Procuro uma guitarra")
-        self.assertIs(first, manager.get_session_history("first"))
+        self.assertEqual(first.messages, manager.get_session_history("first").messages)
         manager.clear_memory("first")
         self.assertEqual(first.messages, [])
         self.assertEqual(second.messages[0].content, "Procuro uma guitarra")
 
+    def test_history_survives_a_new_manager(self):
+        manager = MemoryManager(self.database)
+        manager.get_session_history('persisted').add_messages([
+            HumanMessage(content='Procuro um violão'), AIMessage(content='Qual modelo?')
+        ])
+        manager.close()
+        restored = MemoryManager(self.database)
+        self.addCleanup(restored.close)
+        self.assertEqual([m.content for m in restored.get_session_history('persisted').messages],
+                         ['Procuro um violão', 'Qual modelo?'])
+
 
 class GuardrailTests(unittest.TestCase):
+    def setUp(self):
+        self.metrics_patch = patch.object(guardrails, '_metrics_logger')
+        self.metrics = self.metrics_patch.start()
+        self.addCleanup(self.metrics_patch.stop)
+
     def test_only_explicit_permission_is_accepted(self):
         for content, allowed in [
             ("PERMITIDA", True), (" permitida\n", True),
@@ -44,7 +67,7 @@ class GuardrailTests(unittest.TestCase):
         with patch.object(guardrails, "_guardrail_chain") as chain:
             chain.return_value.invoke.return_value = AIMessage(content="PERMITIDA")
             self.assertTrue(guardrails.check_input_guardrail("E esse?", "modelo", history))
-            chain.assert_called_once_with("modelo")
+            chain.assert_called_with("modelo")
             payload = json.loads(chain.return_value.invoke.call_args.args[0]["payload"])
             self.assertEqual([m['texto'] for m in payload['historico']], [m.content for m in history[-4:]])
             self.assertEqual(payload['entrada'], 'E esse?')
@@ -57,12 +80,33 @@ class GuardrailTests(unittest.TestCase):
             self.assertTrue(guardrails.check_input_guardrail('Qual é o frete?'))
             self.assertEqual(chain.return_value.invoke.call_count, 2)
 
-    def test_ambiguous_classification_is_an_error_not_a_scope_refusal(self):
+    def test_ambiguous_classification_falls_open_after_two_attempts(self):
         for content in ['NÃO PERMITIDA', 'PERMITIDA ou BLOQUEADA', '']:
             with self.subTest(content=content), patch.object(guardrails, '_guardrail_chain') as chain:
                 chain.return_value.invoke.return_value = AIMessage(content=content)
-                with self.assertRaisesRegex(RuntimeError, 'Não foi possível validar'):
-                    guardrails.check_input_guardrail('Posso parcelar?')
+                self.assertTrue(guardrails.check_input_guardrail('Posso parcelar?'))
+                self.assertEqual(chain.return_value.invoke.call_count, 2)
+                event = json.loads(self.metrics.return_value.log.call_args.args[1])
+                self.assertEqual(event['event'], 'PARSE_ERROR')
+                self.assertTrue(event['fallback'])
+
+    def test_connection_error_falls_open_and_is_logged(self):
+        with patch.object(guardrails, '_guardrail_chain', side_effect=ConnectionError('local')):
+            self.assertTrue(guardrails.check_input_guardrail('Olá'))
+        event = json.loads(self.metrics.return_value.log.call_args.args[1])
+        self.assertEqual(event['event'], 'EXCEPTION')
+        self.assertTrue(event['fallback'])
+        self.assertEqual(event['error_type'], 'ConnectionError')
+
+    def test_explicit_block_is_logged_without_fallback_or_input_text(self):
+        with patch.object(guardrails, '_guardrail_chain') as chain:
+            chain.return_value.invoke.return_value = AIMessage(content='BLOQUEADA')
+            self.assertFalse(guardrails.check_input_guardrail('conteúdo privado'))
+        event = json.loads(self.metrics.return_value.log.call_args.args[1])
+        self.assertEqual(event['event'], 'BLOCKED')
+        self.assertFalse(event['fallback'])
+        self.assertNotIn('conteúdo privado', str(self.metrics.return_value.log.call_args))
+        self.assertIn('latency_ms', event)
 
     def test_long_catalog_is_bounded_and_not_inserted_as_chat_instructions(self):
         history = [AIMessage(content='Catálogo: ' + 'produto ' * 3000)]
@@ -94,10 +138,15 @@ class ConversationTests(unittest.TestCase):
             cls.agent = importlib.import_module("agent")
 
     def setUp(self):
-        self.agent.memory_manager.store.clear()
-        self.addCleanup(self.agent.memory_manager.store.clear)
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        manager = MemoryManager(f"sqlite:///{Path(directory.name) / 'history.db'}")
+        self.addCleanup(manager.close)
         self.patches = ExitStack()
         self.addCleanup(self.patches.close)
+        self.patches.enter_context(patch.object(self.agent, 'memory_manager', manager))
+        self.patches.enter_context(patch.object(self.agent.agent_with_history, 'get_session_history', manager.get_session_history))
+        self.patches.enter_context(patch.object(guardrails, '_metrics_logger'))
         self.guard = self.patches.enter_context(
             patch.object(self.agent, "check_input_guardrail", return_value=True)
         )
@@ -110,7 +159,7 @@ class ConversationTests(unittest.TestCase):
         history = self.agent.memory_manager.get_session_history("a").messages
         self.assertEqual([m.content for m in history], ["Quero um violão", "Resposta final corrigida"])
         self.agent.process_user_message("E o preço dele?", "a")
-        self.assertEqual(len(history), 4)
+        self.assertEqual(len(self.agent.memory_manager.get_session_history('a').messages), 4)
         self.assertEqual(len(self.respond.call_args.args[1]), 2)
         self.assertEqual(self.respond.call_args.args[1][1].content, "Resposta final corrigida")
         self.assertEqual(self.guard.call_args.args[1], self.agent.model_name)

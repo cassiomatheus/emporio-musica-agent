@@ -1,1 +1,4 @@
 .venv/
+__pycache__/
+guardrail_metrics.log*
+db/chat_history.db*

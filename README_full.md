@@ -4,7 +4,7 @@ Assistente em português para consultar instrumentos, preços, estoque, pedidos 
 
 ## Como funciona
 
-- **Dados estruturados:** os CSVs de produtos, pedidos e clientes são importados para SQLite. O agente usa ferramentas SQL para consultar essas informações.
+- **Dados estruturados:** os CSVs de produtos, pedidos, clientes e promoções são carregados no SQLite por upsert com staging e chaves primárias. O agente usa ferramentas SQL para consultar essas informações.
 - **Políticas da loja:** o PDF é dividido em trechos, convertido em embeddings com `sentence-transformers/all-MiniLM-L6-v2` e indexado no ChromaDB. A ferramenta de consulta de políticas recupera os três trechos mais próximos da pergunta.
 - **Modelo:** o `qwen3.5:9b`, via `ChatOllama`, decide quais ferramentas consultar e prepara a resposta. O código usa `langchain-classic` para `AgentExecutor` e `create_tool_calling_agent`.
 - **Memória e guardião:** `process_user_message` verifica o escopo antes de executar as ferramentas. `RunnableWithMessageHistory` mantém as mensagens aceitas e as respostas finais por ID de sessão.
@@ -72,6 +72,7 @@ O script de ingestão espera estes arquivos, com os nomes e acentos abaixo:
 | `data/desafio_tecnico_ai_eng - products.csv` | Tabela `produtos` |
 | `data/desafio_tecnico_ai_eng - orders.csv` | Tabela `pedidos` |
 | `data/desafio_tecnico_ai_eng - customers.csv` | Tabela `clientes` |
+| `data/desafio_tecnico_ai_eng - promotions.csv` | Tabela `promocoes` |
 | `data/políticas_da_loja.pdf` | Coleção de documentos no ChromaDB |
 
 Com a `.venv` ativa, execute:
@@ -80,11 +81,28 @@ Com a `.venv` ativa, execute:
 python src/data_ingestion.py
 ```
 
-Isso cria as tabelas em `db/emporio.db` e persiste os embeddings do PDF em `vectorstore/`. O modelo de embeddings é baixado na primeira execução. Confira no terminal as mensagens de sucesso das duas etapas: o script captura os erros, portanto terminar a execução não garante que ambas tenham sido concluídas.
+Isso cria as tabelas em `db/emporio.db` e persiste os embeddings do PDF em `vectorstore/`. O modelo de embeddings é baixado na primeira execução. Confira no terminal as mensagens de sucesso das duas etapas. Uma falha interrompe o comando com erro; uma falha no PDF não desfaz a etapa SQL já concluída.
 
-Ao repetir a ingestão, as três tabelas SQLite são **substituídas** pelos CSVs. A etapa do ChromaDB adiciona documentos à coleção existente, podendo duplicar trechos em execuções repetidas; o script ainda não implementa uma reconstrução idempotente do índice.
+Execute a ingestão com o Streamlit parado. As quatro tabelas comerciais recebem **upsert por chave primária**: registros novos são inseridos e campos fornecidos são atualizados, sem remover linhas ausentes do CSV ou outras tabelas. Não use a ausência de uma promoção no CSV para desativá-la: envie is_active=0. O banco chat_history.db não é alterado.
 
-Os arquivos `categories.csv`, `order_items.csv` e `promotions.csv` também estão em `data/`, com o prefixo `desafio_tecnico_ai_eng - `, mas **não são importados pela ingestão atual**. Os arquivos de `data/processado/` também não participam desse fluxo. Consultas a essas fontes exigem ampliar a ingestão.
+A carga usa staging temporário, INSERT ON CONFLICT DO UPDATE e uma transação SQL. Esquemas legados sem PK são migrados preservando dados, índices e triggers; chaves nulas/duplicadas provocam erro e rollback. Colunas novas do CSV são acrescentadas e colunas existentes não fornecidas são preservadas. Uma falha em qualquer tabela reverte a carga SQL inteira.
+
+No ChromaDB, IDs SHA-256 combinam fonte e conteúdo. Trechos inalterados não são regravados; trechos novos/alterados são inseridos por upsert. Depois, versões obsoletas apenas daquele PDF são removidas, incluindo os IDs aleatórios da versão anterior. O diretório e as outras fontes não são apagados. Uma falha de embeddings não remove os trechos anteriores; operações entre SQLite e ChromaDB não formam uma transação única.
+
+Os arquivos `categories.csv` e `order_items.csv` também estão em `data/`, com o prefixo `desafio_tecnico_ai_eng - `, mas **não são importados pela ingestão atual**. Os arquivos de `data/processado/` também não participam desse fluxo. Consultas a essas fontes exigem ampliar a ingestão.
+
+### Adicionar um CSV novo
+
+Registre a fonte e sua chave em `src/data_ingestion.py`, por exemplo:
+
+```python
+SOURCES["categorias"] = "desafio_tecnico_ai_eng - categories.csv"
+PRIMARY_KEYS["categorias"] = "category_id"
+```
+
+Depois execute a ingestão e reinicie o Streamlit. A tabela categorias será adicionada sem substituir as tabelas anteriores. Para o agente utilizá-la corretamente, explique no prompt a relação produtos.category_id = categorias.category_id. Não é preciso substituir price_brl por price nem category_id por category: o pipeline conserva o esquema real das fontes.
+
+Cada fonte cadastrada deve existir e conter sua chave sem valores nulos ou repetidos. Fontes não cadastradas não são importadas automaticamente. Não remova a chave de uma tabela existente nem altere seu tipo sem uma migração específica.
 
 ## 4. Executar o chat
 
@@ -97,7 +115,7 @@ python -m streamlit run src/app.py
 
 Abra o endereço exibido no terminal, normalmente `http://localhost:8501`. Para encerrar, pressione `Ctrl+C`. Para reiniciar após alterações, execute o mesmo comando novamente.
 
-Após modificar `agent.py`, `guardrails.py` ou `memory.py`, pare o servidor com `Ctrl+C` e inicie-o novamente para recarregar os módulos e a configuração do classificador. Esse reinício perde a memória em RAM; selecione novamente o produto antes de testar perguntas de continuação. Não é necessário repetir a ingestão quando apenas o código de conversa mudar.
+Após modificar `agent.py`, `guardrails.py` ou `memory.py`, pare o servidor com `Ctrl+C` e inicie-o novamente para recarregar os módulos e a configuração do classificador. O histórico permanece em db/chat_history.db. Guarde o código da conversa exibido na barra lateral e use **Retomar conversa** depois de reiniciar para recuperar as mensagens e o contexto. Não é necessário repetir a ingestão quando apenas o código de conversa mudar.
 
 Exemplos de perguntas:
 
@@ -142,9 +160,9 @@ A entrada principal do chat é `process_user_message(user_input, session_id)`, d
 2. `src/guardrails.py` classifica apenas a pergunta atual, usando até quatro mensagens anteriores como contexto, com até 1.200 caracteres por mensagem. A entrada e o histórico são enviados como dados JSON, separados das instruções do classificador. O guardião usa o mesmo `model_name` do agente, com `reasoning=False`, `num_ctx=8192` e `num_predict=64`.
 3. Para entradas aceitas, `RunnableWithMessageHistory` fornece o histórico a `get_agent_response`, que mantém as correções de catálogo e a recuperação de respostas vazias.
 4. A memória registra uma única vez a pergunta e a resposta final efetivamente exibida, incluindo a tabela corrigida do catálogo. Perguntas bloqueadas e turnos com falha não são gravados na memória do agente; as mensagens exibidas continuam no histórico visual da interface.
-5. O botão **Nova conversa** limpa a memória da sessão atual, reinicia o histórico visual e gera outro ID.
+5. O botão **Nova conversa** apaga a memória persistida da sessão atual, reinicia o histórico visual e gera outro ID. Para continuar uma conversa anterior, informe seu código em **Retomar conversa** na barra lateral.
 
-`src/memory.py` mantém os históricos em um dicionário no processo Python. Reiniciar o servidor perde essa memória, e uma nova sessão do Streamlit recebe outro ID. Não há persistência em Redis ou banco de dados. A classificação do guardião depende do modelo; a configuração atual não representa autenticação de clientes nem autorização de acesso a pedidos.
+`src/memory.py` usa SQLChatMessageHistory com SQLite em db/chat_history.db, separado do banco comercial. Os históricos persistem após reiniciar, mas a interface precisa do mesmo código para recuperar uma sessão. A ingestão não apaga esse banco. A classificação do guardião depende do modelo; a configuração atual não representa autenticação de clientes nem autorização de acesso a pedidos.
 
 O retorno do guardião é tratado da seguinte forma, após remover espaços externos e converter para maiúsculas:
 
@@ -152,11 +170,18 @@ O retorno do guardião é tratado da seguinte forma, após remover espaços exte
 | --- | --- |
 | `PERMITIDA` | Executar o agente com o histórico da sessão. |
 | `BLOQUEADA` | Exibir a recusa de escopo, sem executar o agente nem gravar o turno em sua memória. |
-| Qualquer outra saída, inclusive vazia ou ambígua | Repetir a classificação uma vez, reforçando o formato. Se continuar inválida, informar “Não foi possível validar sua pergunta neste momento”, sem liberar o agente. |
+| Saída vazia ou ambígua | Repetir uma vez. Se continuar inválida, registrar PARSE_ERROR com fallback=true e liberar o agente (fail-open). |
+| Exceção na chamada do classificador | Registrar EXCEPTION e liberar o agente (fail-open). |
 
-Uma falha de formato do classificador não é apresentada como uma recusa por assunto fora do escopo. Cada saída inválida gera um aviso no terminal, sem registrar o texto da pergunta nesse aviso.
+As falhas não são apresentadas como recusa por assunto fora de escopo. O arquivo guardrail_metrics.log registra eventos SAFE, BLOCKED, PARSE_ERROR e EXCEPTION com request_id, latency_ms, attempt e fallback, sem o texto das conversas. Há rotação de até 1 MB por arquivo e dois backups. O fallback não garante que o agente principal recusará toda entrada indevida. Os eventos medem formato e disponibilidade; não medem acerto semântico sem dados de referência.
 
 O guardião adiciona uma chamada ao modelo por pergunta, ou duas se a primeira classificação vier em formato inválido. Para manter essa validação, novas interfaces devem chamar `process_user_message`; chamadas diretas a `get_agent_response` não passam pelo guardião.
+
+## Promoções e monitoramento
+
+A tabela promocoes relaciona product_id, discount_percent e is_active. Consulte apenas as ativas. A tabela de catálogo calcula o preço final por produto com o maior desconto ativo, sem acumular promoções; mostra preço original, percentual e preço final. Produtos sem promoção são preservados. O CSV não fornece datas de vigência: is_active é o indicador disponível.
+
+Os logs ficam na raiz em guardrail_metrics.log e são ignorados pelo Git, assim como db/chat_history.db. Um mesmo request_id pode ter dois PARSE_ERROR ou um PARSE_ERROR seguido de SAFE/BLOCKED; agrupe por request_id para contar perguntas, sem confundir tentativas com atendimentos. Uma decisão SAFE representa a classificação do modelo, não uma confirmação externa de que a decisão estava correta.
 
 ## Testes
 
@@ -168,7 +193,7 @@ python -m unittest discover -s tests -v
 
 Os testes de catálogo usam um SQLite temporário e cobrem listagem completa, estoque zero, limites explícitos, ordenação por preço, categoria vazia e preservação de filtros SQL.
 
-Os testes de conversa cobrem isolamento de sessões, gravação única da resposta final, contexto entre turnos, bloqueio antes de executar o agente e continuidade do fluxo de compra com as perguntas de parcelamento e frete. Também verificam o envio limitado do histórico em JSON, a nova tentativa após uma classificação inválida e a distinção entre recusa de escopo e erro de validação.
+Os testes de conversa cobrem isolamento de sessões, gravação única da resposta final, contexto entre turnos, bloqueio antes de executar o agente e continuidade do fluxo de compra com as perguntas de parcelamento e frete. Também verificam o envio limitado do histórico em JSON, a nova tentativa após uma classificação inválida e a distinção entre recusa explícita e fallback fail-open. Testes adicionais verificam promoções ativas sem acúmulo, persistência e retomada na interface e sincronização real do ChromaDB em processos separados, usando embeddings de teste sem downloads. A cobertura da ingestão inclui inclusão/atualização sem duplicatas, preservação de linhas ausentes e de outras tabelas, adição de colunas, migração de PK com índices/triggers, rollback em conflitos e preservação de outras fontes e do diretório vetorial.
 
 Os recursos externos são substituídos nos testes: não é necessário ter o Ollama ativo nem baixar os modelos. Esses testes verificam a orquestração; o teste manual do fluxo de compra verifica as respostas produzidas pelo modelo e a consulta às políticas.
 
@@ -180,7 +205,8 @@ Os recursos externos são substituídos nos testes: não é necessário ter o Ol
 | `No module named ...` | Confira o Python ativo com `which python` e reinstale as dependências na `.venv`. Os imports de agentes legados usam `langchain_classic`. |
 | Falha de conexão com Ollama ou modelo não encontrado | Confira se o servidor está ativo e se `ollama list` mostra o mesmo modelo configurado em `src/agent.py`. |
 | Perguntas de parcelamento ou frete recusadas como fora de escopo | Essas perguntas fazem parte do atendimento. Reinicie o servidor para recarregar o guardião atualizado e repita o fluxo na mesma sessão após selecionar o produto. |
-| “Não foi possível validar sua pergunta neste momento” | O classificador retornou uma saída inválida em duas tentativas. Confira os avisos do guardião no terminal e a disponibilidade do modelo no Ollama antes de tentar novamente. |
+| PARSE_ERROR ou EXCEPTION em guardrail_metrics.log | O guardião aplicou fallback fail-open. Verifique o Ollama e a contagem de eventos; uma falha do modelo principal ainda pode impedir a resposta. |
+| Histórico não aparece após reiniciar | Informe o código salvo em **Retomar conversa**. Uma nova sessão recebe outro código; o arquivo SQLite preserva os históricos existentes. |
 | Arquivo de dados não encontrado | Execute na raiz e confira os nomes completos, incluindo espaços e o acento em `políticas_da_loja.pdf`. |
 | Banco ou políticas sem resultados | Confira os logs da ingestão e os arquivos gerados em `db/` e `vectorstore/`. |
 | Aviso de requisições sem `HF_TOKEN` | O modelo público pode ser baixado sem token, sujeito aos limites do Hugging Face. O aviso não indica, por si só, falha na execução. |
@@ -201,18 +227,21 @@ emporio-musica-agent/
 │   ├── políticas_da_loja.pdf
 │   └── processado/            # Arquivos auxiliares fora do fluxo de ingestão
 ├── db/
-│   └── emporio.db             # SQLite gerado pela ingestão
+│   ├── emporio.db             # Dados comerciais e promoções
+│   └── chat_history.db        # Histórico persistente por sessão
 ├── vectorstore/              # Índice persistente do ChromaDB
 ├── src/
-│   ├── data_ingestion.py      # CSVs → SQLite; PDF → ChromaDB
+│   ├── data_ingestion.py      # CSVs → upsert SQL; PDF → sincronização por hashes
 │   ├── agent.py               # Modelo, ferramentas, prompt e recuperação de resposta
 │   ├── guardrails.py          # Classificação de escopo antes das ferramentas
-│   ├── memory.py              # Histórico do agente em memória, por sessão
+│   ├── memory.py              # Histórico persistente em SQLite, por sessão
 │   ├── catalog.py             # Tabelas e totais de catálogo calculados no SQLite
 │   └── app.py                 # Chat Streamlit e formatação de moeda
 ├── tests/
 │   ├── test_catalog.py
-│   └── test_conversation.py
+│   ├── test_conversation.py
+│   ├── test_ingestion.py
+│   └── test_app.py
 ├── requirements.txt
 └── README.md
 ```

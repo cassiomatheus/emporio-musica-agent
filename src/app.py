@@ -1,5 +1,5 @@
 import re
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import streamlit as st
 from agent import process_user_message
@@ -33,11 +33,32 @@ st.caption("Assistente Virtual de Atendimento ao Cliente")
 if "session_id" not in st.session_state:
     st.session_state.session_id = uuid4().hex
 
-if st.button("Nova conversa"):
+with st.sidebar:
+    st.caption("Guarde o código para retomar esta conversa após reiniciar.")
+    st.code(st.session_state.session_id, language=None)
+    restore_id = st.text_input("Código de uma conversa anterior", key="restore_id")
+    if st.button("Retomar conversa", key="restore_conversation"):
+        try:
+            restored_id = UUID(restore_id.strip()).hex
+            saved = memory_manager.get_session_history(restored_id).messages
+            if saved:
+                st.session_state.session_id = restored_id
+                st.session_state.messages = [
+                    {"role": "user" if message.type == "human" else "assistant", "content": message.text}
+                    for message in saved if message.type in ("human", "ai")
+                ]
+                st.rerun()
+            else:
+                st.warning("Nenhuma conversa encontrada com esse código.")
+        except ValueError:
+            st.warning("Informe um código de conversa válido.")
+
+if st.button("Nova conversa", key="new_conversation"):
     memory_manager.clear_memory(st.session_state.session_id)
     st.session_state.session_id = uuid4().hex
     st.session_state.pop("messages", None)
     st.session_state.pop("chat_history", None)
+    st.rerun()
 
 if "messages" not in st.session_state:
     st.session_state.messages = [{"role": "assistant", "content": "Olá! Sou o assistente da Empório da Música. Como posso te ajudar hoje?"}]

@@ -7,6 +7,6 @@ langchain-chroma
 langchain-huggingface
 streamlit
 pandas
-sqlalchemy
+sqlalchemy[asyncio]
 sentence-transformers
 pypdf

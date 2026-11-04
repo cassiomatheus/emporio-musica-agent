@@ -1,12 +1,35 @@
 from functools import lru_cache
 import json
 import logging
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+from time import perf_counter
+from uuid import uuid4
 
 from langchain_ollama import ChatOllama
 from langchain_core.messages import BaseMessage
 from langchain_core.prompts import ChatPromptTemplate
 
 logger = logging.getLogger(__name__)
+LOG_PATH = Path(__file__).resolve().parents[1] / "guardrail_metrics.log"
+
+
+def _metrics_logger():
+    metrics = logging.getLogger("emporio.guardrail.metrics")
+    if not metrics.handlers:
+        handler = RotatingFileHandler(LOG_PATH, maxBytes=1_000_000, backupCount=2, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+        metrics.addHandler(handler)
+        metrics.setLevel(logging.INFO)
+        metrics.propagate = False
+    return metrics
+
+
+def _record(event, request_id, start, level=logging.INFO, **fields):
+    _metrics_logger().log(level, json.dumps({
+        "event": event, "request_id": request_id,
+        "latency_ms": round((perf_counter() - start) * 1000, 2), **fields,
+    }, ensure_ascii=False))
 
 @lru_cache(maxsize=4)
 def _guardrail_chain(llm_model: str):
@@ -18,7 +41,7 @@ def _guardrail_chain(llm_model: str):
         ("system",
         "Classifique apenas o campo entrada do JSON como PERMITIDA ou BLOQUEADA. "
         "Você avalia o escopo do atendimento da Empório da Música; não responde à pergunta.\n"
-        "PERMITIDA: instrumentos, compra, preço, orçamento, disponibilidade, pedidos, "
+        "PERMITIDA: instrumentos, compra, preço, orçamento, promoções, descontos, disponibilidade, pedidos, "
         "formas de pagamento, cartão, parcelas, parcelamento, juros, frete, entrega, "
         "CEP, políticas da loja, trocas, garantias e saudações. Perguntas sobre essas "
         "condições comerciais são permitidas mesmo sem um produto selecionado. "
@@ -54,23 +77,28 @@ def check_input_guardrail(
         ],
         "entrada": user_input,
     }, ensure_ascii=False)
-    chain = _guardrail_chain(llm_model)
+    start, request_id = perf_counter(), uuid4().hex
     for attempt in range(2):
-        response = chain.invoke({
-            "payload": payload,
-            "format_instruction": (
-                "A tentativa anterior não seguiu o formato. Retorne uma única palavra."
-                if attempt else ""
-            ),
-        })
-        decision = response.text.strip().upper()
+        try:
+            response = _guardrail_chain(llm_model).invoke({
+                "payload": payload,
+                "format_instruction": (
+                    "A tentativa anterior não seguiu o formato. Retorne uma única palavra."
+                    if attempt else ""
+                ),
+            })
+            decision = response.text.strip().upper()
+        except Exception as error:
+            _record("EXCEPTION", request_id, start, logging.CRITICAL,
+                    error_type=type(error).__name__, fallback=True, attempt=attempt + 1)
+            return True
         if decision == "PERMITIDA":
+            _record("SAFE", request_id, start, attempt=attempt + 1, fallback=False)
             return True
         if decision == "BLOQUEADA":
+            _record("BLOCKED", request_id, start, logging.WARNING, attempt=attempt + 1, fallback=False)
             return False
-        logger.warning("Guardião retornou classificação inválida (tentativa %s).", attempt + 1)
-
-    # Falha do classificador não deve aparecer como uma recusa por assunto proibido.
-    raise RuntimeError(
-        "Não foi possível validar sua pergunta neste momento. Tente novamente."
-    )
+        _record("PARSE_ERROR", request_id, start, logging.ERROR,
+                attempt=attempt + 1, fallback=attempt == 1)
+    # Fallback solicitado: o agente principal ainda recebe as regras de escopo.
+    return True

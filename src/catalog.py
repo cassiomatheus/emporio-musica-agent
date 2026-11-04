@@ -58,14 +58,25 @@ def list_products(
             "FROM produtos WHERE category_id = ? AND status = 'active'",
             (category_id,),
         ).fetchone()
+        has_promotions = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='promocoes'"
+        ).fetchone()
+        promotion_join = (
+            " LEFT JOIN (SELECT product_id, MAX(discount_percent) AS discount_percent "
+            "FROM promocoes WHERE is_active = 1 AND discount_percent BETWEEN 0 AND 100 "
+            "GROUP BY product_id) AS promotion ON promotion.product_id = p.product_id "
+            if has_promotions else ""
+        )
+        discount = "COALESCE(promotion.discount_percent, 0)" if has_promotions else "0"
         query = (
-            "SELECT product_id, name, price_brl, stock_quantity FROM produtos "
-            "WHERE category_id = ? AND status = 'active'"
+            f"SELECT p.product_id, p.name, p.price_brl, p.stock_quantity, {discount}, "
+            f"ROUND(p.price_brl * (1 - ({discount}) / 100.0), 2) AS final_price "
+            f"FROM produtos AS p {promotion_join} WHERE p.category_id = ? AND p.status = 'active'"
         )
         parameters = [category_id]
         if only_in_stock:
-            query += " AND stock_quantity > 0"
-        query += " ORDER BY price_brl, product_id"
+            query += " AND p.stock_quantity > 0"
+        query += " ORDER BY final_price, p.product_id"
         if limit is not None:
             query += " LIMIT ?"
             parameters.append(limit)
@@ -80,15 +91,21 @@ def list_products(
         lines.append("Não há produtos que atendam aos filtros solicitados.")
         return "\n".join(lines)
     matching = available if only_in_stock else total
+    show_promotions = any(row[4] > 0 for row in rows)
     lines.extend([
         f"Exibindo **{len(rows)} de {matching} modelos** que atendem aos filtros solicitados, em ordem de preço.",
         "",
-        "| Código | Modelo | Preço | Unidades em estoque | Disponibilidade |",
-        "| --- | --- | --- | --- | --- |",
+        ("| Código | Modelo | Preço original | Desconto | Preço final | Unidades em estoque | Disponibilidade |"
+         if show_promotions else "| Código | Modelo | Preço | Unidades em estoque | Disponibilidade |"),
+        "| --- | --- | --- | --- | --- | --- | --- |" if show_promotions else "| --- | --- | --- | --- | --- |",
     ])
-    for product_id, name, price, stock in rows:
+    for product_id, name, price, stock, discount, final_price in rows:
         name = name.replace("|", "\\|").replace("\n", " ")
         price = f"{price:,.2f}".translate(str.maketrans({",": ".", ".": ","}))
         availability = "Disponível" if stock > 0 else "Temporariamente indisponível"
-        lines.append(f"| {product_id} | {name} | R$ {price} | {stock} | {availability} |")
+        if show_promotions:
+            final_price = f"{final_price:,.2f}".translate(str.maketrans({",": ".", ".": ","}))
+            lines.append(f"| {product_id} | {name} | R$ {price} | {discount:g}% | R$ {final_price} | {stock} | {availability} |")
+        else:
+            lines.append(f"| {product_id} | {name} | R$ {price} | {stock} | {availability} |")
     return "\n".join(lines)

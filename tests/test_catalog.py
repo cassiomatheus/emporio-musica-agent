@@ -78,6 +78,18 @@ class CatalogTests(unittest.TestCase):
                     self.database,
                 ))
 
+    def test_only_active_promotions_apply_without_accumulating_discounts(self):
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute('CREATE TABLE promocoes (product_id INTEGER, discount_percent REAL, is_active INTEGER)')
+            connection.executemany('INSERT INTO promocoes VALUES (?, ?, ?)',
+                                   [(1, 10, 1), (1, 20, 1), (1, 95, 0), (2, 99, 0), (3, 90, 1)])
+        result = list_products(5, db_path=self.database)
+        self.assertIn('| 1 | Violão 1 | R$ 100,50 | 20% | R$ 80,40 |', result)
+        self.assertIn('| 2 | Violão 2 | R$ 201,00 | 0% | R$ 201,00 |', result)
+        self.assertLess(result.index('| 3 |'), result.index('| 1 |'))
+        self.assertIn('**34 de 34 modelos**', result)
+        self.assertEqual(result.count('| 1 | Violão 1 |'), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
