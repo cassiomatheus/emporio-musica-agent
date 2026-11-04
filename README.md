@@ -1,218 +1,89 @@
 # Empório da Música — Assistente de atendimento
 
-Assistente em português para consultar instrumentos, preços, estoque, pedidos e políticas da loja. A aplicação usa Streamlit, LangChain e um modelo local executado pelo Ollama.
+Assistente em português para consultar produtos, estoque, pedidos e políticas da loja, com interface Streamlit, ferramentas SQL e retrieval do PDF. O projeto oferece atendimento consultivo; não efetua pagamentos nem registra compras.
 
-## Como funciona
+## 1. Como executar
 
-- **Dados estruturados:** os CSVs de produtos, pedidos e clientes são importados para SQLite. O agente usa ferramentas SQL para consultar essas informações.
-- **Políticas da loja:** o PDF é dividido em trechos, convertido em embeddings com `sentence-transformers/all-MiniLM-L6-v2` e indexado no ChromaDB. A ferramenta de consulta de políticas recupera os três trechos mais próximos da pergunta.
-- **Modelo:** o `qwen3.5:9b`, via `ChatOllama`, decide quais ferramentas consultar e prepara a resposta. O código usa `langchain-classic` para `AgentExecutor` e `create_tool_calling_agent`.
-- **Memória e guardião:** `process_user_message` verifica o escopo antes de executar as ferramentas. `RunnableWithMessageHistory` mantém as mensagens aceitas e as respostas finais por ID de sessão.
-- **Interface:** o Streamlit gera um ID exclusivo por sessão, mantém as mensagens para exibição, protege os símbolos de moeda da interpretação como fórmulas LaTeX e separa subtítulos de itens numerados que tenham vindo na mesma linha.
+**Pré-requisitos:** Python com `venv` (ambiente validado com Python 3.14.6), [Ollama instalado](https://docs.ollama.com/linux), internet para os downloads iniciais e memória/espaço para os modelos. O provedor é o **Ollama local**, sem chave de API, no endereço padrão `http://localhost:11434`.
 
-SQLite e ChromaDB mantêm os dados no diretório do projeto. Os modelos são baixados inicialmente; a inferência do Qwen é feita pelo Ollama local.
-
-## Pré-requisitos
-
-- Python com suporte às dependências de `requirements.txt`. O ambiente utilizado neste projeto foi validado com **Python 3.14.6**.
-- [Ollama instalado](https://docs.ollama.com/linux), em execução e com o modelo `qwen3.5:9b` disponível.
-- Acesso à internet para instalar os pacotes e baixar os modelos na primeira utilização.
-- Memória e espaço em disco para o modelo e as dependências. A instalação padrão do PyTorch também pode baixar bibliotecas CUDA/NVIDIA.
-
-Os comandos abaixo são para Linux/Bash. Execute os comandos Python **na raiz do projeto**, pois os caminhos de `data/`, `db/` e `vectorstore/` são relativos a ela.
-
-## 1. Instalar as dependências
-
-Na pasta `emporio-musica-agent`:
+Execute os comandos na **raiz do projeto**, em Linux/Bash:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
-python -m pip check
 ```
 
-Em cada novo terminal, ative novamente o ambiente com `source .venv/bin/activate`. Use `python -m pip` para instalar os pacotes no mesmo Python que executa a aplicação. A pasta `.venv/` está no `.gitignore`.
-
-## 2. Preparar o Ollama
-
-Se o servidor ainda não estiver em execução, abra outro terminal e mantenha este comando ativo:
-
-```bash
-ollama serve
-```
-
-No terminal do projeto, baixe e confira o modelo:
+Se o Ollama ainda não estiver em execução como serviço, mantenha `ollama serve` ativo em outro terminal. No terminal do projeto:
 
 ```bash
 ollama pull qwen3.5:9b
 ollama list
 ```
 
-Se o Ollama já estiver funcionando como serviço, não é necessário iniciar outro servidor. Consulte o [guia oficial do Ollama](https://docs.ollama.com/quickstart) para detalhes de execução local.
+O modelo configurado é `qwen3.5:9b`. Para trocá-lo, ajuste `model_name` em `src/agent.py`; ele deve suportar chamadas de ferramentas e a configuração de raciocínio utilizada. O guardião recebe o mesmo nome de modelo.
 
-A configuração atual em `src/agent.py` é:
+Confira os arquivos esperados pela ingestão:
 
-```python
-model_name = "qwen3.5:9b"
-llm = ChatOllama(
-    model=model_name, temperature=0, reasoning=False,
-    num_ctx=8192, num_predict=4096,
-)
+```text
+data/desafio_tecnico_ai_eng - products.csv
+data/desafio_tecnico_ai_eng - orders.csv
+data/desafio_tecnico_ai_eng - customers.csv
+data/políticas_da_loja.pdf
 ```
 
-Para trocar o modelo, baixe a nova versão e ajuste `model_name` nesse arquivo para o nome exato exibido por `ollama list`. O agente e o guardião usam esse mesmo nome. O modelo deve suportar chamadas de ferramentas; confira também a compatibilidade com `reasoning=False`.
-
-## 3. Preparar os dados
-
-O script de ingestão espera estes arquivos, com os nomes e acentos abaixo:
-
-| Arquivo | Destino |
-| --- | --- |
-| `data/desafio_tecnico_ai_eng - products.csv` | Tabela `produtos` |
-| `data/desafio_tecnico_ai_eng - orders.csv` | Tabela `pedidos` |
-| `data/desafio_tecnico_ai_eng - customers.csv` | Tabela `clientes` |
-| `data/políticas_da_loja.pdf` | Coleção de documentos no ChromaDB |
-
-Com a `.venv` ativa, execute:
+Prepare os dados e inicie o chat:
 
 ```bash
 python src/data_ingestion.py
-```
-
-Isso cria as tabelas em `db/emporio.db` e persiste os embeddings do PDF em `vectorstore/`. O modelo de embeddings é baixado na primeira execução. Confira no terminal as mensagens de sucesso das duas etapas: o script captura os erros, portanto terminar a execução não garante que ambas tenham sido concluídas.
-
-Ao repetir a ingestão, as três tabelas SQLite são **substituídas** pelos CSVs. A etapa do ChromaDB adiciona documentos à coleção existente, podendo duplicar trechos em execuções repetidas; o script ainda não implementa uma reconstrução idempotente do índice.
-
-Os arquivos `categories.csv`, `order_items.csv` e `promotions.csv` também estão em `data/`, com o prefixo `desafio_tecnico_ai_eng - `, mas **não são importados pela ingestão atual**. Os arquivos de `data/processado/` também não participam desse fluxo. Consultas a essas fontes exigem ampliar a ingestão.
-
-## 4. Executar o chat
-
-Depois da ingestão, com o Ollama em execução:
-
-```bash
-source .venv/bin/activate
 python -m streamlit run src/app.py
 ```
 
-Abra o endereço exibido no terminal, normalmente `http://localhost:8501`. Para encerrar, pressione `Ctrl+C`. Para reiniciar após alterações, execute o mesmo comando novamente.
+A ingestão gera `db/emporio.db` e `vectorstore/`; o modelo de embeddings é baixado na primeira execução. Confira as mensagens de sucesso das etapas SQLite e PDF. Abra a URL exibida pelo Streamlit, normalmente `http://localhost:8501`.
 
-Após modificar `agent.py`, `guardrails.py` ou `memory.py`, pare o servidor com `Ctrl+C` e inicie-o novamente para recarregar os módulos e a configuração do classificador. Esse reinício perde a memória em RAM; selecione novamente o produto antes de testar perguntas de continuação. Não é necessário repetir a ingestão quando apenas o código de conversa mudar.
+Em novos terminais, reative `.venv`. Para recarregar alterações nos módulos, encerre com `Ctrl+C` e execute novamente o Streamlit. **Nova conversa** limpa a sessão atual. Não é necessário repetir a ingestão a cada execução do chat.
 
-Exemplos de perguntas:
-
-- “Liste todos os violões ativos no catálogo, com preço e disponibilidade.”
-- “Quais são os três violões mais baratos em estoque?”
-- “Qual é a política de trocas por defeito?”
-- “Quais são as condições de frete para Campo Grande?”
-
-## Teste manual do fluxo de compra
-
-Use **Nova conversa** e envie as mensagens na mesma sessão, selecionando um produto encontrado na consulta inicial:
-
-| Etapa | Exemplo de mensagem | Comportamento esperado |
-| --- | --- | --- |
-| Consultar produtos | “Quais violões estão disponíveis?” | Consultar o SQLite e informar preço e estoque. |
-| Selecionar um produto | “Tenho interesse no [nome do produto].” | Manter o produto no contexto da conversa. |
-| Perguntar sobre parcelamento | “Posso parcelar ele até quantas vezes?” | O guardião permite a pergunta; o agente consulta as políticas de pagamento. |
-| Reformular a pergunta | “Posso parcelar ele de quantas vezes?” | A reformulação continua no escopo e preserva o contexto. |
-| Consultar entrega | “Qual é o valor do frete?” | O guardião permite a pergunta; o agente consulta as políticas de frete e pede o destino se necessário. |
-
-Perguntas sobre pagamento, parcelas e frete também estão no escopo sem um produto previamente selecionado. Nesse caso, o agente deve solicitar os dados que faltarem para responder às condições específicas. As respostas comerciais devem se basear no PDF, em vez de inventar valores ou condições.
-
-Como verificação de bloqueio, uma pergunta como “Escreva código Python para calcular o frete” continua fora do escopo. Mencionar “frete” ou “parcelamento” não libera automaticamente qualquer pedido.
-
-## Regras de catálogo e resposta
-
-Um produto **ativo no catálogo** tem `status = 'active'`. Para estar **disponível em estoque**, ele também precisa ter `stock_quantity > 0`. A quantidade de modelos é diferente da soma de unidades em estoque.
-
-O prompt orienta o agente a listar todos os resultados solicitados, sem um limite padrão de cinco opções. Um limite deve ser usado quando o cliente pedir uma seleção, como “os três mais baratos”.
-
-Para consultas SQL completas de categoria reconhecidas por `src/catalog.py`, a tabela final e os totais são gerados diretamente do SQLite. Isso evita depender do modelo para contar ou reescrever todos os itens. Esse tratamento aceita consultas simples com categoria, status ativo e filtro opcional de estoque; consultas com outros filtros, agregações, joins ou `LIMIT` seguem o fluxo normal do agente.
-
-Se o agente retornar texto vazio, o código tenta gerar uma resposta novamente a partir dos resultados das ferramentas. Se a segunda tentativa também vier vazia, o chat exibe um erro.
-
-Na exibição, `chat_markdown` em `src/app.py` escapa símbolos `$` que ainda não estejam escapados e separa subtítulos em negrito terminados em dois-pontos do primeiro produto numerado na mesma linha. Essa formatação também é aplicada ao reexibir o histórico, preservando o texto original armazenado. O prompt orienta o uso de subtítulos em linhas próprias e descrições indentadas; a interface não completa nomes ou informações que o modelo tenha deixado incompletos.
-
-## Memória e guardião
-
-A entrada principal do chat é `process_user_message(user_input, session_id)`, definida em `src/agent.py` e chamada por `src/app.py`:
-
-1. A interface cria um UUID por sessão e reutiliza esse ID nas mensagens seguintes. IDs fixos compartilhariam a memória entre usuários.
-2. `src/guardrails.py` classifica apenas a pergunta atual, usando até quatro mensagens anteriores como contexto, com até 1.200 caracteres por mensagem. A entrada e o histórico são enviados como dados JSON, separados das instruções do classificador. O guardião usa o mesmo `model_name` do agente, com `reasoning=False`, `num_ctx=8192` e `num_predict=64`.
-3. Para entradas aceitas, `RunnableWithMessageHistory` fornece o histórico a `get_agent_response`, que mantém as correções de catálogo e a recuperação de respostas vazias.
-4. A memória registra uma única vez a pergunta e a resposta final efetivamente exibida, incluindo a tabela corrigida do catálogo. Perguntas bloqueadas e turnos com falha não são gravados na memória do agente; as mensagens exibidas continuam no histórico visual da interface.
-5. O botão **Nova conversa** limpa a memória da sessão atual, reinicia o histórico visual e gera outro ID.
-
-`src/memory.py` mantém os históricos em um dicionário no processo Python. Reiniciar o servidor perde essa memória, e uma nova sessão do Streamlit recebe outro ID. Não há persistência em Redis ou banco de dados. A classificação do guardião depende do modelo; a configuração atual não representa autenticação de clientes nem autorização de acesso a pedidos.
-
-O retorno do guardião é tratado da seguinte forma, após remover espaços externos e converter para maiúsculas:
-
-| Classificação | Ação |
-| --- | --- |
-| `PERMITIDA` | Executar o agente com o histórico da sessão. |
-| `BLOQUEADA` | Exibir a recusa de escopo, sem executar o agente nem gravar o turno em sua memória. |
-| Qualquer outra saída, inclusive vazia ou ambígua | Repetir a classificação uma vez, reforçando o formato. Se continuar inválida, informar “Não foi possível validar sua pergunta neste momento”, sem liberar o agente. |
-
-Uma falha de formato do classificador não é apresentada como uma recusa por assunto fora do escopo. Cada saída inválida gera um aviso no terminal, sem registrar o texto da pergunta nesse aviso.
-
-O guardião adiciona uma chamada ao modelo por pergunta, ou duas se a primeira classificação vier em formato inválido. Para manter essa validação, novas interfaces devem chamar `process_user_message`; chamadas diretas a `get_agent_response` não passam pelo guardião.
-
-## Testes
-
-Na raiz do projeto, com a `.venv` ativa:
+Para verificar dependências e executar os testes, sem exigir Ollama ativo:
 
 ```bash
+python -m pip check
 python -m unittest discover -s tests -v
 ```
 
-Os testes de catálogo usam um SQLite temporário e cobrem listagem completa, estoque zero, limites explícitos, ordenação por preço, categoria vazia e preservação de filtros SQL.
+Teste o contexto na mesma conversa: escolha um produto, pergunte “Posso parcelar ele até quantas vezes?” e depois “Qual é o valor do frete?”. Essas perguntas estão no escopo; as condições devem ser consultadas nas políticas da loja.
 
-Os testes de conversa cobrem isolamento de sessões, gravação única da resposta final, contexto entre turnos, bloqueio antes de executar o agente e continuidade do fluxo de compra com as perguntas de parcelamento e frete. Também verificam o envio limitado do histórico em JSON, a nova tentativa após uma classificação inválida e a distinção entre recusa de escopo e erro de validação.
+## 2. Decisões técnicas
 
-Os recursos externos são substituídos nos testes: não é necessário ter o Ollama ativo nem baixar os modelos. Esses testes verificam a orquestração; o teste manual do fluxo de compra verifica as respostas produzidas pelo modelo e a consulta às políticas.
-
-## Problemas comuns
-
-| Sintoma | Verificação |
+| Escolha | Justificativa |
 | --- | --- |
-| `externally-managed-environment` | Ative `.venv` e use `python -m pip install -r requirements.txt`. |
-| `No module named ...` | Confira o Python ativo com `which python` e reinstale as dependências na `.venv`. Os imports de agentes legados usam `langchain_classic`. |
-| Falha de conexão com Ollama ou modelo não encontrado | Confira se o servidor está ativo e se `ollama list` mostra o mesmo modelo configurado em `src/agent.py`. |
-| Perguntas de parcelamento ou frete recusadas como fora de escopo | Essas perguntas fazem parte do atendimento. Reinicie o servidor para recarregar o guardião atualizado e repita o fluxo na mesma sessão após selecionar o produto. |
-| “Não foi possível validar sua pergunta neste momento” | O classificador retornou uma saída inválida em duas tentativas. Confira os avisos do guardião no terminal e a disponibilidade do modelo no Ollama antes de tentar novamente. |
-| Arquivo de dados não encontrado | Execute na raiz e confira os nomes completos, incluindo espaços e o acento em `políticas_da_loja.pdf`. |
-| Banco ou políticas sem resultados | Confira os logs da ingestão e os arquivos gerados em `db/` e `vectorstore/`. |
-| Aviso de requisições sem `HF_TOKEN` | O modelo público pode ser baixado sem token, sujeito aos limites do Hugging Face. O aviso não indica, por si só, falha na execução. |
-| Símbolos de moeda e negrito desformatados | A interface escapa `$` ao renderizar mensagens novas e o histórico. Reinicie a aplicação para carregar a versão atualizada. |
-| Subtítulo e primeiro produto na mesma linha | A interface separa o padrão de subtítulo em negrito seguido de item numerado. Reinicie a aplicação para carregar a correção. |
+| **LangChain + `langchain-classic`** | Integram modelo, ferramentas SQL, retriever e histórico. `AgentExecutor` coordena as consultas com a API utilizada no projeto. |
+| **Qwen 3.5 9B via Ollama** | Permite inferência local e chamadas de ferramentas. Temperatura zero e `reasoning=False` priorizam respostas diretas; contexto de 8.192 tokens e saída de até 4.096 tokens acomodam consultas e listas. Não foi realizado benchmark comparativo de modelos. |
+| **SQLite para CSVs** | Mantém preços, estoque e pedidos estruturados, permitindo filtros e contagens por SQL. Evita usar similaridade textual para calcular totais. |
+| **ChromaDB + MiniLM para o PDF** | Índice vetorial persistente e embeddings locais com `all-MiniLM-L6-v2`. Trechos de 1.000 caracteres, sobreposição de 100 e recuperação dos três mais próximos são parâmetros iniciais para preservar continuidade e limitar o contexto. |
+| **Prompt com regras de domínio** | Orienta consultas SQL para dados e retrieval para políticas, resposta em português, distinção entre ativo e disponível, listagens completas e solicitação de dados ausentes. O histórico e os resultados das ferramentas entram no contexto do agente. |
+| **Guardião e memória por sessão** | O guardião classifica o escopo antes das ferramentas, usando contexto recente em JSON. A memória guarda a resposta final por UUID; o Streamlit mantém a apresentação e oferece reinício da conversa. |
 
-## Estrutura
+Fluxo: **pergunta → guardião → agente com histórico → SQL/retrieval → resposta**. Para listagens SQL simples de categoria reconhecidas por `src/catalog.py`, o código calcula os totais e monta a tabela diretamente do banco, reduzindo erros de contagem do modelo. A interface trata moeda e separação entre subtítulos e listas.
 
-```text
-emporio-musica-agent/
-├── data/
-│   ├── desafio_tecnico_ai_eng - products.csv
-│   ├── desafio_tecnico_ai_eng - orders.csv
-│   ├── desafio_tecnico_ai_eng - customers.csv
-│   ├── desafio_tecnico_ai_eng - categories.csv
-│   ├── desafio_tecnico_ai_eng - order_items.csv
-│   ├── desafio_tecnico_ai_eng - promotions.csv
-│   ├── políticas_da_loja.pdf
-│   └── processado/            # Arquivos auxiliares fora do fluxo de ingestão
-├── db/
-│   └── emporio.db             # SQLite gerado pela ingestão
-├── vectorstore/              # Índice persistente do ChromaDB
-├── src/
-│   ├── data_ingestion.py      # CSVs → SQLite; PDF → ChromaDB
-│   ├── agent.py               # Modelo, ferramentas, prompt e recuperação de resposta
-│   ├── guardrails.py          # Classificação de escopo antes das ferramentas
-│   ├── memory.py              # Histórico do agente em memória, por sessão
-│   ├── catalog.py             # Tabelas e totais de catálogo calculados no SQLite
-│   └── app.py                 # Chat Streamlit e formatação de moeda
-├── tests/
-│   ├── test_catalog.py
-│   └── test_conversation.py
-├── requirements.txt
-└── README.md
-```
+## 3. Limitações e próximos passos
+
+**Limitações conhecidas:**
+
+- A ingestão carrega apenas produtos, pedidos e clientes. Categorias, itens de pedidos e promoções ainda não são importados. Reexecutá-la substitui essas tabelas e pode duplicar trechos no ChromaDB.
+- O modelo pode errar SQL, classificação de escopo ou interpretação das políticas. A correção determinística de catálogo cobre apenas consultas simples reconhecidas; não valida toda resposta gerada. A qualidade do retrieval em português ainda não foi avaliada sistematicamente.
+- A memória existe apenas em RAM e se perde ao reiniciar o servidor. Não há autenticação por cliente, autorização de acesso a pedidos ou restrição dedicada das ferramentas SQL a consultas de leitura.
+- O desempenho depende do hardware; o guardião acrescenta uma chamada por pergunta, com nova tentativa se o formato for inválido. As dependências não estão integralmente fixadas, e as APIs de memória utilizadas têm avisos de descontinuação na versão instalada.
+
+**Com mais tempo:** integrar as fontes restantes e tornar a ingestão idempotente; avaliar embeddings multilíngues e reranking com perguntas de referência; ampliar testes de fluxo e precisão das respostas; persistir memória, implementar controles de acesso e SQL somente leitura; fixar versões e migrar as APIs de memória legadas.
+
+## 4. Uso de assistente de código
+
+Foi utilizado o **OpenAI Codex**, com acesso ao repositório e ao terminal, como apoio à implementação, diagnóstico e documentação. O workflow foi iterativo:
+
+1. Os testes manuais do chat forneceram erros de execução, respostas incorretas e exemplos de quebra do fluxo de compra.
+2. O Codex inspecionou código, dados e logs, propôs e aplicou ajustes de compatibilidade do LangChain, catálogo, formatação, memória e guardião.
+3. As alterações foram verificadas com testes automatizados, testes da interface via Streamlit AppTest e chamadas ao Ollama local; novos testes manuais orientaram as correções seguintes.
+
+A IA também auxiliou na redação deste README. As verificações cobrem os casos exercitados e não representam garantia de acerto em todos os cenários de atendimento.
+
+Detalhes de arquitetura, módulos, solução de problemas e operação estão no [guia completo](README_full.md).
