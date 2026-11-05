@@ -4,7 +4,7 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 
-from src.catalog import list_products, render_catalog_query
+from src.catalog import list_products, render_catalog_query, render_availability_question
 
 
 class CatalogTests(unittest.TestCase):
@@ -89,6 +89,36 @@ class CatalogTests(unittest.TestCase):
         self.assertLess(result.index('| 3 |'), result.index('| 1 |'))
         self.assertIn('**34 de 34 modelos**', result)
         self.assertEqual(result.count('| 1 | Violão 1 |'), 1)
+
+    def test_drum_availability_uses_real_category_and_preserves_stock_counts(self):
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.executemany('INSERT INTO produtos VALUES (?, ?, ?, ?, ?, ?)', [
+                (139, 'Bateria Acústica Yamaha Kit 1 Studio', 4439, 8, 3, 'active'),
+                (140, 'Bateria Acústica Pearl Kit 2 Studio', 13285, 7, 3, 'active'),
+                (141, 'Bateria Acústica Yamaha Kit 3 Studio', 14922, 8, 3, 'active'),
+                (142, 'Bateria sem estoque', 1000, 0, 3, 'active'),
+                (143, 'Bateria descontinuada', 1000, 5, 3, 'discontinued'),
+            ])
+        for question in ('Tem baterias?', 'Tem bateria?', 'Vocês têm baterias?', 'Estou procurando uma bateria', 'Mostre as baterias em estoque'):
+            with self.subTest(question=question):
+                result = render_availability_question(question, self.database, {3: 'Baterias e Percussão'})
+                self.assertIn('**3 de 3 modelos**', result)
+                self.assertIn('Bateria Acústica Yamaha Kit 1 Studio', result)
+                self.assertIn('Bateria Acústica Pearl Kit 2 Studio', result)
+                self.assertIn('Bateria Acústica Yamaha Kit 3 Studio', result)
+                self.assertNotIn('Bateria sem estoque', result)
+                self.assertNotIn('Bateria descontinuada', result)
+
+    def test_category_ids_are_resolved_from_names_not_assumed(self):
+        result = render_availability_question('Tem violões?', self.database, {5: 'Violões', 1: 'Guitarras'})
+        self.assertIn('**33 de 33 modelos**', result)
+        self.assertIn('Violão 1', result)
+
+    def test_additional_filters_or_ambiguous_requests_are_not_overridden(self):
+        categories = {3: 'Baterias e Percussão', 6: 'Instrumentos de Sopro (Madeiras)', 7: 'Instrumentos de Sopro (Metais)'}
+        for question in ('Tem baterias até 500 reais?', 'Tem baterias da Yamaha?', 'Tem sopro?', 'Não mostre baterias', 'Qual é o frete?', 'Tem banjos?'):
+            with self.subTest(question=question):
+                self.assertIsNone(render_availability_question(question, self.database, categories))
 
 
 if __name__ == "__main__":

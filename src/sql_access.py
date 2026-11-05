@@ -4,11 +4,10 @@ from pathlib import Path
 import sqlite3
 
 from langchain_community.utilities import SQLDatabase
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine
 
 ROOT = Path(__file__).resolve().parents[1]
-PUBLIC_TABLES = frozenset({"produtos", "pedidos", "promocoes"})
-PUBLIC_ORDER_COLUMNS = frozenset({"order_id", "order_date", "status", "total_brl", "estimated_delivery"})
+PUBLIC_TABLES = frozenset({"produtos", "promocoes"})
 SAFE_FUNCTIONS = frozenset({
     "abs", "avg", "char", "coalesce", "count", "date", "datetime", "format", "glob", "hex",
     "ifnull", "iif", "instr", "json_extract", "json_valid", "julianday", "length", "like",
@@ -34,8 +33,6 @@ def create_public_database(db_path: Path = ROOT / "db/emporio.db") -> SQLDatabas
                 return sqlite3.SQLITE_OK
             if database != "main" or table not in PUBLIC_TABLES:
                 return sqlite3.SQLITE_DENY
-            if table == "pedidos" and column and column not in PUBLIC_ORDER_COLUMNS:
-                return sqlite3.SQLITE_DENY
             return sqlite3.SQLITE_OK
         if action == sqlite3.SQLITE_FUNCTION and (column or "").lower() in SAFE_FUNCTIONS:
             return sqlite3.SQLITE_OK
@@ -53,14 +50,8 @@ def create_public_database(db_path: Path = ROOT / "db/emporio.db") -> SQLDatabas
 
     engine = create_engine("sqlite://", creator=connect)
     try:
-        order_columns = inspect(engine).get_columns("pedidos")
-        safe_schema = ', '.join(
-            f'"{column["name"]}" {column["type"]}'
-            for column in order_columns if column['name'] in PUBLIC_ORDER_COLUMNS
-        )
         db = SQLDatabase(
             engine, include_tables=sorted(PUBLIC_TABLES), sample_rows_in_table_info=0,
-            custom_table_info={"pedidos": f"CREATE TABLE pedidos ({safe_schema})"},
         )
         return db
     except Exception:

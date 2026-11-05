@@ -2,8 +2,60 @@
 
 import sqlite3
 import re
+import csv
+import unicodedata
 from contextlib import closing
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+CATEGORY_SOURCE = ROOT / "data/desafio_tecnico_ai_eng - categories.csv"
+
+
+def load_categories(path: Path = CATEGORY_SOURCE) -> dict[int, str]:
+    with Path(path).open(encoding="utf-8-sig", newline="") as source:
+        rows = list(csv.DictReader(source))
+    categories = {int(row["category_id"]): row["name"].strip() for row in rows}
+    if len(categories) != len(rows) or not all(categories.values()):
+        raise ValueError("Categorias devem ter IDs únicos e nomes preenchidos.")
+    return categories
+
+
+def _fold(text: str) -> str:
+    text = ''.join(character for character in unicodedata.normalize('NFKD', text.lower())
+                   if not unicodedata.combining(character))
+    return ' '.join(re.sub(r'[^a-z0-9\s]', ' ', text).split())
+
+
+def _singular(word: str) -> str:
+    if word.endswith('oes'):
+        return word[:-3] + 'ao'
+    if word in {'metais', 'orquestrais'}:
+        return {'metais': 'metal', 'orquestrais': 'orquestral'}[word]
+    return word[:-1] if word.endswith('s') and len(word) > 3 else word
+
+
+def render_availability_question(question: str, db_path: str = "db/emporio.db",
+                                 categories: dict[int, str] | None = None) -> str | None:
+    """Responde consultas curtas de categoria; filtros adicionais ficam no agente."""
+    normalized = _fold(question)
+    match = re.fullmatch(
+        r'(?:tem(?: um| uma| uns| umas)?|voces tem|ha|quais(?: sao)?(?: os| as)?|'
+        r'(?:estou procurando|procuro|busco)(?: um| uma| uns| umas)?|'
+        r'(?:liste|mostre)(?: todos os| todas as| os| as)?)\s+(.+?)'
+        r'(?:\s+(?:disponivel|disponiveis|em estoque|no estoque|na loja|no catalogo))?',
+        normalized,
+    )
+    target = match[1] if match else normalized
+    target = ' '.join(_singular(word) for word in target.split())
+    matches = []
+    for category_id, name in (load_categories() if categories is None else categories).items():
+        words = [_singular(word) for word in _fold(name).split()]
+        aliases = {' '.join(words)} | (set(words) - {'e', 'de', 'instrumento', 'corda'})
+        if target in aliases:
+            matches.append(category_id)
+    if len(matches) != 1:
+        return None
+    return list_products(matches[0], only_in_stock=True, db_path=db_path)
 
 
 def render_catalog_query(query: str, db_path: str = "db/emporio.db") -> str | None:

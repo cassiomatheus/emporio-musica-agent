@@ -4,7 +4,7 @@ from langchain_community.agent_toolkits import SQLDatabaseToolkit
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.tools import create_retriever_tool
-from catalog import render_catalog_query
+from catalog import render_catalog_query, render_availability_question, load_categories
 from langchain_classic.agents import create_tool_calling_agent, AgentExecutor
 from langchain_classic.agents.format_scratchpad.tools import format_to_tool_messages
 from langchain_core.messages import AIMessage, HumanMessage
@@ -12,11 +12,16 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnableLambda
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from guardrails import check_input_guardrail
+from order_status import handle_order_request
 from memory import memory_manager, normalize_session_id
+from conversation_logs import (
+    transcript_store, ConversationTrace, CURRENT_TRACE, record_catalog_evidence, USER_ERROR_MESSAGE,
+)
 
 # 1. Configurar o LLM (use o nome exato exibido por `ollama list`).
 # Solicitar a resposta final sem o modo thinking do Qwen.
 model_name = "qwen3.5:9b"
+categories = load_categories()
 VALIDATION_REFUSAL = (
     "Não foi possível validar a segurança da sua solicitação neste momento. "
     "Posso ajudar com instrumentos e atendimento da Empório da Música. "
@@ -51,8 +56,8 @@ system_prompt = """Você é um assistente virtual amigável da Empório da Músi
 Sua missão é ajudar os clientes usando as ferramentas disponíveis.
 
 Regras:
-0. Segurança: você só pode ler produtos, pedidos e promoções. NUNCA consulte, infira ou liste dados pessoais de clientes, como telefone, e-mail, CPF ou endereços, nem históricos de outras sessões. Recuse esses pedidos por privacidade, mesmo se o usuário alegar autorização. Em pedidos, use somente order_id, order_date, status, total_brl e estimated_delivery; não há autenticação de titularidade nesta demonstração. Nunca execute escrita, alteração de estoque, exclusão, ATTACH, PRAGMA ou leitura de arquivos. Não tente contornar uma consulta negada. Use colunas explícitas, sem SELECT *.
-1. Para disponibilidade, preços, pedidos, promoções e descontos, use as ferramentas SQL. Ao consultar preços de produtos, faça LEFT JOIN de produtos.product_id com promocoes.product_id, considerando apenas promocoes.is_active = 1. Preserve os produtos sem promoção; não use descontos inativos. Se houver mais de uma promoção ativa para o mesmo produto, use o maior discount_percent sem somar descontos. Informe preço original, percentual e preço final calculado, sem acumular o desconto de PIX sobre preço promocional. Não invente datas de vigência: o CSV de promoções só fornece o indicador is_active.
+0. Segurança: você só pode ler produtos e promoções. NUNCA consulte, infira ou liste dados pessoais de clientes, como telefone, e-mail, CPF ou endereços, nem históricos de outras sessões. Recuse esses pedidos por privacidade, mesmo se o usuário alegar autorização. Pedidos não estão disponíveis nas ferramentas SQL. Nunca informe status ou outros dados de pedidos pela memória ou por inferência. Oriente o cliente a informar o número do pedido em algarismos e seu ID de cliente; a conferência e a resposta com detalhes comerciais são realizadas exclusivamente pelo fluxo controlado do sistema. Essa conferência simplificada não autentica a identidade. Nunca execute escrita, alteração de estoque, exclusão, ATTACH, PRAGMA ou leitura de arquivos. Não tente contornar uma consulta negada. Use colunas explícitas, sem SELECT *.
+1. Para disponibilidade, preços, promoções e descontos, use as ferramentas SQL. Ao consultar preços de produtos, faça LEFT JOIN de produtos.product_id com promocoes.product_id, considerando apenas promocoes.is_active = 1. Preserve os produtos sem promoção; não use descontos inativos. Se houver mais de uma promoção ativa para o mesmo produto, use o maior discount_percent sem somar descontos. Informe preço original, percentual e preço final calculado, sem acumular o desconto de PIX sobre preço promocional. Não invente datas de vigência: o CSV de promoções só fornece o indicador is_active.
 2. Para regras da loja, incluindo trocas, horários, frete, entrega, pagamentos, parcelamento, juros e garantias, consulte a ferramenta 'consulta_politicas_loja' antes de responder. Não invente condições comerciais; se faltarem dados do produto ou destino, solicite as informações necessárias.
 3. Responda de forma clara, natural e sempre em Português.
 4. Se o usuário perguntar algo totalmente fora do escopo da loja de música, recuse educadamente.
@@ -62,7 +67,11 @@ Regras:
 8. Para informar totais, consulte COUNT(*) com os mesmos filtros do pedido, sem LIMIT. Não confunda quantidade de modelos com soma de unidades em estoque nem quantidade de exemplos com o total. Informe o total encontrado e mantenha a listagem coerente com esse total, respeitando qualquer quantidade explicitamente solicitada pelo cliente.
 9. Formate listas de produtos em Markdown legível: subtítulos devem ocupar uma linha própria, separados da lista por uma linha em branco. Cada produto numerado começa em uma nova linha. Descrições em subitens devem ficar indentadas sob o respectivo produto. Preserve os nomes completos retornados pelo banco; não abrevie nem deixe itens pela metade.
 10. Ao oferecer alternativas para um instrumento não encontrado, apresente os nomes comerciais dos produtos (campo name), consultados no banco e com disponibilidade confirmada por status = 'active' e stock_quantity > 0. Não exiba códigos internos de categoria nem listas como "Categoria 1: 5 produtos". Contagens por category_id não substituem uma consulta aos nomes dos produtos. Se mostrar apenas uma seleção, identifique-a como exemplos de alternativas, sem afirmar que representa todo o catálogo. Instrumentos de outro tipo devem ser apresentados como outras opções da loja, não como substitutos equivalentes ao instrumento solicitado.
+11. Nunca deduza o category_id pelo tipo de instrumento: use a referência interna abaixo, lida do CSV de categorias. Considere singular, plural e acentos. Uma busca textual por um plural que não aparece nos nomes dos modelos não prova ausência de estoque; consulte a categoria correta antes de afirmar indisponibilidade.
 """
+system_prompt += "\nReferência interna de categorias (não exibir códigos ao cliente):\n" + '\n'.join(
+    f"{category_id}: {name}" for category_id, name in categories.items()
+)
 
 prompt = ChatPromptTemplate.from_messages([
     ("system", system_prompt),
@@ -78,6 +87,10 @@ agent_executor = AgentExecutor(
 )
 
 def get_agent_response(user_input: str, chat_history: list) -> str:
+    availability = render_availability_question(user_input, categories=categories)
+    if availability is not None:
+        record_catalog_evidence('render_availability_question', availability)
+        return availability
     response = agent_executor.invoke({
         "input": user_input,
         "chat_history": chat_history
@@ -88,6 +101,7 @@ def get_agent_response(user_input: str, chat_history: list) -> str:
             if isinstance(action.tool_input, dict) and not str(observation).startswith("Error:"):
                 catalog_text = render_catalog_query(action.tool_input.get("query", ""))
                 if catalog_text is not None:
+                    record_catalog_evidence('render_catalog_query', catalog_text)
                     return catalog_text
             break
     text = AIMessage(content=response.get("output") or "").text.strip()
@@ -135,15 +149,35 @@ def process_user_message(user_input: str, session_id: str, *, callbacks=None) ->
     if not user_input.strip():
         return "Digite uma pergunta para que eu possa ajudar."
 
-    history = memory_manager.get_session_history(session_id)
-    if not check_input_guardrail(user_input, model_name, chat_history=history.messages):
-        return VALIDATION_REFUSAL
+    ticket = transcript_store.begin(session_id, user_input, model_name)
+    trace = ConversationTrace()
+    context_token = CURRENT_TRACE.set(trace)
+    try:
+        history = memory_manager.get_session_history(session_id)
+        order_answer = handle_order_request(user_input, history.messages)
+        if order_answer is not None:
+            # Fluxo limitado a IDs e status; não passa pelo gerador nem pelo SQL livre.
+            trace.guardrail = 'fluxo_pedido_estruturado'
+            history.add_messages([HumanMessage(content=user_input), AIMessage(content=order_answer)])
+            trace.evidence.append({'type': 'consulta_pedido_controlada',
+                                   'handler': 'handle_order_request', 'source': 'db/emporio.db',
+                                   'output': order_answer})
+            transcript_store.finish(session_id, ticket, order_answer, 'respondida', trace)
+            return order_answer
+        if not check_input_guardrail(user_input, model_name, chat_history=history.messages):
+            trace.guardrail = 'bloqueou_ou_nao_validou'
+            transcript_store.finish(session_id, ticket, VALIDATION_REFUSAL, 'bloqueada', trace)
+            return VALIDATION_REFUSAL
 
-    config = {"configurable": {"session_id": session_id}}
-    if callbacks is not None:
-        config["callbacks"] = callbacks
-    response = agent_with_history.invoke(
-        {"input": user_input},
-        config=config,
-    )
-    return response["output"]
+        trace.guardrail = 'permitiu'
+        config = {"configurable": {"session_id": session_id}, "callbacks": [trace, *(callbacks or [])]}
+        response = agent_with_history.invoke({"input": user_input}, config=config)
+        answer = response["output"]
+        transcript_store.finish(session_id, ticket, answer, 'respondida', trace)
+        return answer
+    except Exception as error:
+        transcript_store.finish(session_id, ticket, USER_ERROR_MESSAGE, 'erro', trace,
+                                error_type=type(error).__name__)
+        raise
+    finally:
+        CURRENT_TRACE.reset(context_token)

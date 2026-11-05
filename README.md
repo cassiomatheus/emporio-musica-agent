@@ -36,6 +36,7 @@ data/desafio_tecnico_ai_eng - products.csv
 data/desafio_tecnico_ai_eng - orders.csv
 data/desafio_tecnico_ai_eng - customers.csv
 data/desafio_tecnico_ai_eng - promotions.csv
+data/desafio_tecnico_ai_eng - categories.csv
 data/políticas_da_loja.pdf
 ```
 
@@ -48,7 +49,7 @@ python -m streamlit run src/app.py
 
 A ingestão gera `db/emporio.db` e `vectorstore/`; o modelo de embeddings é baixado na primeira execução. Confira as mensagens de sucesso das etapas SQLite e PDF. Abra a URL exibida pelo Streamlit, normalmente `http://localhost:8501`.
 
-Em novos terminais, reative `.venv`. Para recarregar alterações nos módulos, encerre com `Ctrl+C` e execute novamente o Streamlit. O código na barra lateral permite retomar a conversa em **Retomar conversa**, inclusive após reiniciar o servidor. **Nova conversa** apaga o histórico persistido da sessão atual. Não é necessário repetir a ingestão a cada execução do chat.
+Em novos terminais, reative `.venv`. Para recarregar alterações nos módulos, encerre com `Ctrl+C` e execute novamente o Streamlit. O código na barra lateral permite retomar a conversa em **Retomar conversa**, inclusive após reiniciar o servidor. **Nova conversa** inicia uma sessão independente e preserva a memória anterior para retomada pelo código, além das transcrições locais. Não é necessário repetir a ingestão a cada execução do chat.
 
 Teste o contexto na mesma conversa: escolha um produto, pergunte “Posso parcelar ele até quantas vezes?” e depois “Qual é o valor do frete?”. Essas perguntas estão no escopo; as condições devem ser consultadas nas políticas da loja.
 
@@ -71,13 +72,21 @@ As fontes cadastradas são lidas e validadas antes das alterações. Uma falha d
 
 Para adicionar outro CSV, cadastre seu arquivo em `SOURCES` e sua chave em `PRIMARY_KEYS`, em `src/data_ingestion.py`. A nova tabela será criada em `emporio.db` sem apagar as existentes; informe suas relações no prompt e reinicie o agente para atualizar o esquema conhecido. O [guia completo](README_full.md) traz um exemplo.
 
+## Transcrições automáticas e jornadas
+
+Para salvar as mensagens pelo chat, clique em **Salvar mensagens**, na barra lateral. O navegador baixa um arquivo Markdown com a conversa atual, incluindo a última resposta. Salve antes de clicar em **Nova conversa**. O download não chama o modelo nem executa cenários; revise informações pessoais antes de compartilhar.
+
+As conversas são salvas automaticamente em `conversas/`, com `transcricao.md` para leitura e `eventos.jsonl` para análise. Os arquivos incluem perguntas, respostas, recusas, erros e ferramentas capturadas, preservando a primeira execução. **Nova conversa** inicia outro contexto e preserva a conversa anterior no SQLite e nos arquivos. O código privado de retomada da sessão é omitido; o conteúdo ainda pode conter dados pessoais e deve ser revisado antes de compartilhar. A pasta está no `.gitignore`.
+
+Os seis roteiros, critérios e instruções estão em [CENARIOS_AVALIACAO.md](CENARIOS_AVALIACAO.md). Para executar a jornada principal com o Ollama real, use `python scripts/run_scenario.py C01`. Cada rodada gera outra pasta com transcrição, referências e `avaliacao.md` inicialmente **PENDENTE**. Concluir a execução não significa PASS. No C06, o reinício automatizado verifica o backend; a retomada no Streamlit também precisa de conferência manual.
+
 ## Decisões arquiteturais
 
 A escolha das tecnologias priorizou a reutilização de conhecimentos adquiridos em projetos acadêmicos de processamento de dados, modelos de linguagem e recuperação de informações. Isso permitiu concentrar o desenvolvimento na integração entre as fontes e na experiência de atendimento, enquanto o LangChain foi incorporado para simplificar a orquestração das ferramentas.
 
 Optei por uma arquitetura em Python com um agente orientado a ferramentas. Os dados transacionais e as políticas documentais têm características diferentes e, por isso, são tratados por mecanismos distintos. O agente utiliza ferramentas SQL para informações estruturadas e uma ferramenta de recuperação semântica para o PDF. A interface, o histórico de mensagens e a classificação de escopo ficam separados dessas consultas.
 
-**SQLite — dados estruturados.** Escolhi o SQLite por ser leve, relacional e suficiente para o volume dos arquivos fornecidos. Ele permite aplicar filtros, ordenações e contagens sobre produtos, estoque e pedidos sem depender de similaridade semântica ou da memória do LLM. A escolha também aproveitou minha experiência prévia com bancos de dados e processamento de informações no projeto de mestrado. Nesta versão, a ingestão importa produtos, pedidos, clientes e promoções; categorias e itens de pedidos ainda não integram o banco utilizado pelo agente. As promoções são relacionadas por product_id e apenas is_active = 1 libera o desconto.
+**SQLite — dados estruturados.** Escolhi o SQLite por ser leve, relacional e suficiente para o volume dos arquivos fornecidos. Ele permite aplicar filtros, ordenações e contagens sobre produtos, estoque e pedidos sem depender de similaridade semântica ou da memória do LLM. A escolha também aproveitou minha experiência prévia com bancos de dados e processamento de informações no projeto de mestrado. Nesta versão, a ingestão importa produtos, pedidos, clientes e promoções; categorias é lido como referência pública dos tipos de instrumento, sem tabela SQL; itens de pedidos ainda não integram o banco utilizado pelo agente. As promoções são relacionadas por product_id e apenas is_active = 1 libera o desconto.
 
 **ChromaDB — base vetorial.** Para as políticas da loja, aproveitei minha experiência de pesquisa com representações vetoriais, embeddings e recuperação de informações. O ChromaDB fornece um índice persistente, permitindo reutilizar os embeddings do manual entre execuções. A busca semântica é empregada para localizar trechos pertinentes; ela não substitui consultas exatas ao banco de produtos.
 
@@ -99,7 +108,7 @@ Uma evolução seria comparar modelos sob os mesmos cenários, incluindo qualida
 
 ## Estratégia de retrieval para as políticas da loja
 
-As informações de produtos e pedidos são consultadas via SQL; as regras sobre devolução, troca, garantia, horário, frete e pagamento são recuperadas do PDF por busca semântica.
+As informações de produtos são consultadas pelas ferramentas SQL; o status de pedidos usa uma consulta parametrizada após a conferência de pedido e cliente; as regras sobre devolução, troca, garantia, horário, frete e pagamento são recuperadas do PDF por busca semântica.
 
 A ingestão divide o manual em **trechos de 1.000 caracteres, com sobreposição de 100 caracteres**, para reduzir a perda de contexto nas fronteiras entre fragmentos. Cada trecho é convertido em vetor pelo modelo `sentence-transformers/all-MiniLM-L6-v2` e armazenado no ChromaDB.
 
@@ -115,7 +124,10 @@ Como próximos passos, avaliaria modelos multilíngues, diferentes configuraçõ
 
 ## Estratégia de prompt
 
-O prompt define a persona de atendimento em português e orienta o uso de SQL para catálogo, preços, estoque e pedidos, e de `consulta_politicas_loja` para condições comerciais. As regras distinguem produtos ativos de produtos com estoque, exigem consultas antes de informar valores e orientam a solicitação de dados ausentes, como o destino da entrega. O histórico da sessão e os resultados das ferramentas entram no contexto para permitir perguntas de continuação.
+Perguntas curtas de disponibilidade, como “Tem baterias?”, são resolvidas por consulta estruturada ao estoque após o guardião. O código usa o CSV de categorias para identificar a categoria correta, trata singular/plural e monta a tabela com produtos ativos e estoque positivo. Pedidos com filtros adicionais continuam no agente, que também recebe essa referência interna para não deduzir IDs de categoria.
+
+
+O prompt define a persona de atendimento em português e orienta o uso de SQL para catálogo, preços e estoque, e de `consulta_politicas_loja` para condições comerciais. As regras distinguem produtos ativos de produtos com estoque, exigem consultas antes de informar valores e orientam a solicitação de dados ausentes, como o destino da entrega. O histórico da sessão e os resultados das ferramentas entram no contexto para permitir perguntas de continuação.
 
 As instruções também tratam a apresentação: listas completas quando solicitadas, nomes comerciais dos produtos em vez de códigos internos de categoria e alternativas com disponibilidade consultada. Para listagens simples reconhecidas por `src/catalog.py`, a tabela e os totais são calculados diretamente do SQLite. Essa verificação complementa o prompt, sem tornar todas as respostas determinísticas.
 
@@ -125,25 +137,31 @@ Antes de chamar o agente, a função `process_user_message` executa um **guardi�
 
 Perguntas sobre instrumentos e atendimento da loja são encaminhadas; solicitações externas ao domínio, como produção de código ou assuntos sem relação com a loja, são recusadas educadamente.
 
-O guardião opera em **fail-closed**: apenas a classificação exata PERMITIDA libera o agente. Uma saída inválida é tentada novamente uma vez; se persistir, ou houver exceção/indisponibilidade do classificador, a pergunta é bloqueada e o evento é registrado. A interface apresenta uma mensagem amigável de validação, sem executar as ferramentas nem expor a exceção interna.
+O guardião opera em **fail-closed** para falhas técnicas ou de formato. A classificação exata PERMITIDA libera o agente. Uma regra restrita reconhece perguntas completas sobre o instrumento escolhido na própria conversa e corrige um BLOQUEADA indevido, registrando `rule=own_product_recall` e a decisão original. Essa regra não aceita pedidos adicionais ou acesso a outras sessões e não libera exceções ou saídas inválidas. Uma saída inválida é tentada novamente uma vez; se persistir, ou houver exceção/indisponibilidade do classificador, a pergunta é bloqueada e o evento é registrado. A interface apresenta uma mensagem amigável de validação, sem executar as ferramentas nem expor a exceção interna.
 
-O histórico do atendimento é separado por identificador de sessão e persiste em db/chat_history.db usando SQLChatMessageHistory. O código da conversa pode ser usado na barra lateral para retomar as mensagens e o contexto após reiniciar. A opção **Nova conversa** apaga o histórico da sessão atual.
+O histórico do atendimento é separado por identificador de sessão e persiste em db/chat_history.db usando SQLChatMessageHistory. O código da conversa pode ser usado na barra lateral para retomar as mensagens e o contexto após reiniciar. A opção **Nova conversa** inicia uma sessão independente e preserva a memória anterior e as transcrições locais.
 
 **Limite importante:** esse guardião controla assunto, não identidade nem permissões de acesso.
 
-As ferramentas comerciais usam uma conexão SQLite aberta com mode=ro e query_only. Além de include_tables, um authorizer permite somente leituras de produtos, pedidos e promocoes, bloqueando escrita, DDL, ATTACH, PRAGMA e funções não autorizadas. A tabela clientes não fica disponível, inclusive para consultas SQL diretas. Em pedidos, apenas order_id, order_date, status, total_brl e estimated_delivery são acessíveis; customer_id, notes e outros campos ficam bloqueados. O esquema enviado ao LLM não contém amostras de registros.
+As ferramentas comerciais usam uma conexão SQLite aberta com mode=ro e query_only. Além de include_tables, um authorizer permite somente leituras de produtos e promocoes, bloqueando escrita, DDL, ATTACH, PRAGMA e funções não autorizadas. As tabelas clientes e pedidos não ficam disponíveis nas ferramentas do modelo, inclusive para consultas SQL diretas. Um fluxo separado em `src/order_status.py` pede o ID de cliente e só retorna os detalhes comerciais quando uma consulta parametrizada encontra o par `order_id` e `customer_id`. Uma falha retorna a mesma mensagem para pedido inexistente ou ID incorreto, sem revelar o titular esperado. O esquema enviado ao LLM não contém amostras de registros.
 
 A criação e a retomada de conversas exigem UUID4 em formato hexadecimal de 32 caracteres, validado também no backend. O código é uma credencial bearer: quem o conhece pode acessar aquele histórico. Isso reduz adivinhação, mas não substitui autenticação, expiração, revogação e autorização por titularidade. A consulta de status de pedidos ainda não valida a identidade do solicitante; o protótipo não deve ser apresentado como pronto para produção. O classificador por LLM também não é uma proteção comprovada contra toda forma de prompt injection.
 
 Eventos SAFE, BLOCKED, PARSE_ERROR e EXCEPTION são registrados em guardrail_metrics.log, com ID de requisição, latência, tentativa e indicador de fallback, sem o texto integral das conversas. O arquivo tem rotação. Esses dados medem decisões e falhas de formato/operação; a taxa de acerto semântico exige perguntas rotuladas para comparação.
 
+### Consulta de status no protótipo
+
+Envie “Quero saber a situação do meu pedido 9”. O chat pede seu **ID de cliente** (`customer_id`). Responda, por exemplo, “Meu ID é …”, com o valor do seu cadastro. Somente uma correspondência entre pedido e cliente libera os detalhes comerciais; também é possível informar os dois números na mesma mensagem. Cada novo pedido exige seu ID novamente. A consulta mostra data, status, valor total, forma de pagamento, rastreamento e previsão de entrega cadastrados, sem repetir o número do pedido. Campos ausentes aparecem como não informados. Nome, telefone, endereço e notas internas continuam indisponíveis. O fluxo não usa as ferramentas SQL livres do LLM.
+
+Essa conferência é uma simplificação para demonstração, não autenticação de identidade. Não use dados reais ou publique IDs de clientes nas conversas de entrega. Para produção, seriam necessários autenticação, autorização pelo usuário autenticado e proteção contra tentativas repetidas.
+
 ## Limitações e próximos passos
 
 **Limitações conhecidas:**
 
-- A ingestão carrega produtos, pedidos, clientes e promoções; categorias e itens de pedidos ainda não são importados. O SQL usa staging temporário e upsert por chave primária, preservando registros ausentes do CSV e outras tabelas. IDs nulos ou duplicados interrompem a carga. No ChromaDB, a sincronização por fonte não é uma transação conjunta com o SQLite; uma interrupção pode exigir repetir a carga.
+- A ingestão carrega produtos, pedidos, clientes e promoções; o CSV de categorias é usado como referência pública de nomes e IDs, sem importação SQL, e itens de pedidos ainda não são importados. O SQL usa staging temporário e upsert por chave primária, preservando registros ausentes do CSV e outras tabelas. IDs nulos ou duplicados interrompem a carga. No ChromaDB, a sincronização por fonte não é uma transação conjunta com o SQLite; uma interrupção pode exigir repetir a carga.
 - O modelo pode errar SQL, classificação de escopo ou interpretação das políticas. A correção determinística de catálogo cobre apenas consultas simples reconhecidas; não valida toda resposta gerada. A qualidade do retrieval em português ainda não foi avaliada sistematicamente.
-- A memória persiste em SQLite e a retomada depende do código UUID4 privado. Ainda faltam autenticação de identidade, expiração/revogação de códigos e autorização por titularidade para pedidos. As ferramentas SQL já são somente leitura e não acessam a tabela clientes.
+- A memória persiste em SQLite e a retomada depende do código UUID4 privado. Ainda faltam autenticação de identidade, expiração/revogação de códigos e autorização por titularidade para pedidos. A conferência de pedido e cliente é simplificada: IDs digitados podem ser conhecidos ou adivinhados e não autenticam o solicitante. Não há limite dedicado de tentativas. As ferramentas SQL já são somente leitura e não acessam clientes nem pedidos.
 - O desempenho depende do hardware; o guardião acrescenta uma chamada por pergunta, com nova tentativa se o formato for inválido. As dependências não estão integralmente fixadas, e as APIs de memória utilizadas têm avisos de descontinuação na versão instalada.
 
 **Com mais tempo:** integrar as fontes restantes e versionar as políticas com publicação atômica; avaliar embeddings multilíngues e reranking com perguntas de referência; ampliar testes de fluxo e precisão das respostas; gerenciar a retenção do histórico, implementar autenticação e autorização por titularidade; fixar versões e migrar as APIs de memória legadas.
@@ -187,9 +205,11 @@ emporio-musica-agent/
 │   ├── data_ingestion.py      # CSVs → upsert SQL; PDF → sincronização por hashes
 │   ├── agent.py               # Modelo, ferramentas, prompt e recuperação de resposta
 │   ├── guardrails.py          # Classificação de escopo antes das ferramentas
+│   ├── conversation_logs.py   # Transcrições privadas e evidências por turno
 │   ├── memory.py              # Histórico persistente e validação UUID4
+│   ├── order_status.py        # Status somente após correspondência pedido/cliente
 │   ├── sql_access.py          # SQL de leitura e autorização de tabelas/colunas
-│   ├── catalog.py             # Tabelas e totais de catálogo calculados no SQLite
+│   ├── catalog.py             # Busca por categoria e tabelas de estoque no SQLite
 │   └── app.py                 # Chat Streamlit e formatação de moeda
 ├── tests/
 │   ├── test_catalog.py
@@ -198,7 +218,11 @@ emporio-musica-agent/
 │   ├── test_app.py
 │   └── test_sql_access.py
 ├── scripts/
+│   ├── run_scenario.py         # Seis jornadas; cada rodada preservada
 │   └── evaluate_qwen.py        # Dez cenários com o Ollama real
+├── cenarios/roteiros.json      # Mensagens e expectativas das seis jornadas
+├── conversas/                 # Arquivos privados gerados, ignorados pelo Git
+├── CENARIOS_AVALIACAO.md       # Guia de execução e revisão das jornadas
 ├── AVALIACAO_QWEN.md           # Transcrições e evidências da avaliação
 ├── requirements.txt
 └── README.md

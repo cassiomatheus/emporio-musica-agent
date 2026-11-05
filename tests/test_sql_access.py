@@ -27,7 +27,7 @@ class SQLAccessTests(unittest.TestCase):
         self.addCleanup(self.db._engine.dispose)
 
     def test_only_public_schema_is_exposed_without_samples_or_private_order_columns(self):
-        self.assertEqual(set(self.db.get_usable_table_names()), {'produtos','pedidos','promocoes'})
+        self.assertEqual(set(self.db.get_usable_table_names()), {'produtos','promocoes'})
         schema = self.db.get_table_info()
         for private in ('clientes','customer_id','notes','TELEFONE_PRIVADO','NOTA_PRIVADA'):
             self.assertNotIn(private, schema)
@@ -35,7 +35,7 @@ class SQLAccessTests(unittest.TestCase):
     def test_reads_joins_and_counts_continue_working(self):
         result = self.db.run('SELECT p.name, ROUND(p.price_brl*(1-pr.discount_percent/100.0),2) FROM produtos p JOIN promocoes pr ON p.product_id=pr.product_id WHERE pr.is_active=1')
         self.assertIn('90.0', result)
-        self.assertIn('shipped', self.db.run('SELECT status FROM pedidos WHERE order_id=10'))
+        self.assertTrue(self.db.run_no_throw('SELECT status FROM pedidos WHERE order_id=10').startswith('Error:'))
 
     def test_new_physical_connection_keeps_authorization_after_initialization(self):
         self.db._engine.dispose()
@@ -49,6 +49,7 @@ class SQLAccessTests(unittest.TestCase):
             'SELECT p.name,c.email FROM produtos p JOIN clientes c ON c.customer_id=p.product_id',
             'WITH segredo AS (SELECT phone FROM clientes) SELECT * FROM segredo',
             'SELECT name FROM produtos UNION SELECT email FROM clientes',
+            'SELECT status FROM pedidos', 'SELECT COUNT(*) FROM pedidos',
             'SELECT notes FROM pedidos', 'SELECT customer_id FROM pedidos', 'SELECT * FROM pedidos',
             'SELECT name FROM sqlite_master',
         ]:

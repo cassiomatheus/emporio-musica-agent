@@ -2,3 +2,4 @@
 __pycache__/
 guardrail_metrics.log*
 db/chat_history.db*
+conversas/

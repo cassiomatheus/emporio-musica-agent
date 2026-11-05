@@ -4,7 +4,7 @@ Assistente em português para consultar instrumentos, preços, estoque, pedidos 
 
 ## Como funciona
 
-- **Dados estruturados:** os CSVs de produtos, pedidos, clientes e promoções são carregados no SQLite por upsert com staging e chaves primárias. O agente usa ferramentas SQL para consultar essas informações.
+- **Dados estruturados:** os CSVs de produtos, pedidos, clientes e promoções são carregados no SQLite por upsert com staging e chaves primárias. O agente consulta produtos e promoções via ferramentas SQL; pedidos usam um fluxo controlado de conferência de IDs.
 - **Políticas da loja:** o PDF é dividido em trechos, convertido em embeddings com `sentence-transformers/all-MiniLM-L6-v2` e indexado no ChromaDB. A ferramenta de consulta de políticas recupera os três trechos mais próximos da pergunta.
 - **Modelo:** o `qwen3.5:9b`, via `ChatOllama`, decide quais ferramentas consultar e prepara a resposta. O código usa `langchain-classic` para `AgentExecutor` e `create_tool_calling_agent`.
 - **Memória e guardião:** `process_user_message` verifica o escopo antes de executar as ferramentas. `RunnableWithMessageHistory` mantém as mensagens aceitas e as respostas finais por ID de sessão.
@@ -73,6 +73,7 @@ O script de ingestão espera estes arquivos, com os nomes e acentos abaixo:
 | `data/desafio_tecnico_ai_eng - orders.csv` | Tabela `pedidos` |
 | `data/desafio_tecnico_ai_eng - customers.csv` | Tabela `clientes` |
 | `data/desafio_tecnico_ai_eng - promotions.csv` | Tabela `promocoes` |
+| `data/desafio_tecnico_ai_eng - categories.csv` | Referência de categorias usada pelo agente, sem importação SQL |
 | `data/políticas_da_loja.pdf` | Coleção de documentos no ChromaDB |
 
 Com a `.venv` ativa, execute:
@@ -89,7 +90,7 @@ A carga usa staging temporário, INSERT ON CONFLICT DO UPDATE e uma transação 
 
 No ChromaDB, IDs SHA-256 combinam fonte e conteúdo. Trechos inalterados não são regravados; trechos novos/alterados são inseridos por upsert. Depois, versões obsoletas apenas daquele PDF são removidas, incluindo os IDs aleatórios da versão anterior. O diretório e as outras fontes não são apagados. Uma falha de embeddings não remove os trechos anteriores; operações entre SQLite e ChromaDB não formam uma transação única.
 
-Os arquivos `categories.csv` e `order_items.csv` também estão em `data/`, com o prefixo `desafio_tecnico_ai_eng - `, mas **não são importados pela ingestão atual**. Os arquivos de `data/processado/` também não participam desse fluxo. Consultas a essas fontes exigem ampliar a ingestão.
+Os arquivos `categories.csv` e `order_items.csv` também estão em `data/`, com o prefixo `desafio_tecnico_ai_eng - `, mas **não são importados pela ingestão SQL atual**. O CSV de categorias é lido pelo agente como referência pública para resolver nomes e IDs; não é necessário ampliar as permissões SQL para utilizá-lo. Os arquivos de `data/processado/` também não participam desse fluxo. Consultas a essas fontes exigem ampliar a ingestão.
 
 ### Adicionar um CSV novo
 
@@ -142,6 +143,8 @@ Como verificação de bloqueio, uma pergunta como “Escreva código Python para
 
 ## Regras de catálogo e resposta
 
+Perguntas curtas e inequívocas de disponibilidade, como “Tem baterias?” ou “Tem bateria?”, passam pelo guardião e são atendidas diretamente por consulta estruturada. Os nomes são resolvidos pelo CSV de categorias, e a resposta usa somente produtos ativos com estoque positivo. A tabela retornada também é armazenada na memória da conversa. Filtros de marca, orçamento ou pedidos ambíguos continuam no agente com a referência interna de categorias.
+
 Um produto **ativo no catálogo** tem `status = 'active'`. Para estar **disponível em estoque**, ele também precisa ter `stock_quantity > 0`. A quantidade de modelos é diferente da soma de unidades em estoque.
 
 O prompt orienta o agente a listar todos os resultados solicitados, sem um limite padrão de cinco opções. Um limite deve ser usado quando o cliente pedir uma seleção, como “os três mais baratos”.
@@ -160,7 +163,7 @@ A entrada principal do chat é `process_user_message(user_input, session_id)`, d
 2. `src/guardrails.py` classifica apenas a pergunta atual, usando até quatro mensagens anteriores como contexto, com até 1.200 caracteres por mensagem. A entrada e o histórico são enviados como dados JSON, separados das instruções do classificador. O guardião usa o mesmo `model_name` do agente, com `reasoning=False`, `num_ctx=8192` e `num_predict=64`.
 3. Para entradas aceitas, `RunnableWithMessageHistory` fornece o histórico a `get_agent_response`, que mantém as correções de catálogo e a recuperação de respostas vazias.
 4. A memória registra uma única vez a pergunta e a resposta final efetivamente exibida, incluindo a tabela corrigida do catálogo. Perguntas bloqueadas e turnos com falha não são gravados na memória do agente; as mensagens exibidas continuam no histórico visual da interface.
-5. O botão **Nova conversa** apaga a memória persistida da sessão atual, reinicia o histórico visual e gera outro ID. Para continuar uma conversa anterior, informe seu código em **Retomar conversa** na barra lateral.
+5. O botão **Nova conversa** preserva a memória e as transcrições da sessão anterior, reinicia o histórico visual e gera outro ID. Para continuar uma conversa anterior, informe seu código em **Retomar conversa** na barra lateral.
 
 `src/memory.py` usa SQLChatMessageHistory com SQLite em db/chat_history.db, separado do banco comercial. Os históricos persistem após reiniciar, mas a interface precisa do mesmo código para recuperar uma sessão. A ingestão não apaga esse banco. A classificação do guardião depende do modelo; o código bearer não representa autenticação de identidade nem autorização por titularidade de pedidos. Quem possui o código válido pode retomar a conversa; não há expiração ou revogação específica.
 
@@ -173,13 +176,15 @@ O retorno do guardião é tratado da seguinte forma, após remover espaços exte
 | Saída vazia ou ambígua | Repetir uma vez. Se continuar inválida, registrar PARSE_ERROR com fallback=false, decision=BLOCKED e não executar o agente. |
 | Exceção na chamada do classificador | Registrar EXCEPTION com decision=BLOCKED e não executar o agente. |
 
+Perguntas completas reconhecidas sobre o instrumento escolhido na própria conversa têm uma correção restrita de escopo: um BLOQUEADA do LLM pode ser convertido em SAFE, registrado com `rule=own_product_recall` e `classifier_decision=BLOCKED`. Mensagens com instruções adicionais ou histórico alheio não correspondem à regra. Exceções e formato inválido continuam bloqueados.
+
 As falhas não são apresentadas como recusa por assunto fora de escopo. O arquivo guardrail_metrics.log registra eventos SAFE, BLOCKED, PARSE_ERROR e EXCEPTION com request_id, latency_ms, attempt e fallback, sem o texto das conversas. Há rotação de até 1 MB por arquivo e dois backups. A falha do classificador não libera o agente. Uma classificação PERMITIDA incorreta ainda é possível; as restrições SQL são independentes do modelo. Os eventos medem formato e disponibilidade; não medem acerto semântico sem dados de referência.
 
 O guardião adiciona uma chamada ao modelo por pergunta, ou duas se a primeira classificação vier em formato inválido. Para manter essa validação, novas interfaces devem chamar `process_user_message`; chamadas diretas a `get_agent_response` não passam pelo guardião.
 
 ## Restrições SQL
 
-A conexão de leitura do agente está em src/sql_access.py. O arquivo comercial é aberto com mode=ro, query_only e um authorizer SQLite. As únicas tabelas permitidas são produtos, pedidos e promocoes; clientes e outros bancos/tabelas não podem ser lidos nem por consultas diretas. Pedidos expõe apenas order_id, order_date, status, total_brl e estimated_delivery. Não são enviados exemplos de registros ao modelo. Escrita, DDL, ATTACH, PRAGMA e funções fora da lista permitida são negados.
+A conexão de leitura do agente está em src/sql_access.py. O arquivo comercial é aberto com mode=ro, query_only e um authorizer SQLite. As únicas tabelas permitidas nas ferramentas do modelo são produtos e promocoes; pedidos, clientes e outros bancos/tabelas não podem ser lidos nem por consultas diretas. `src/order_status.py` consulta data, status, valor total, forma de pagamento, rastreamento e previsão de entrega, com `WHERE order_id = ? AND customer_id = ?`, por uma conexão separada de leitura. O chat pede o ID do cliente quando recebe um número de pedido e não retorna status antes da correspondência. O ID deve ser informado novamente para cada novo pedido. IDs digitados não autenticam identidade; a demonstração não possui limite dedicado de tentativas. Não são enviados exemplos de registros ao modelo. Escrita, DDL, ATTACH, PRAGMA e funções fora da lista permitida são negados.
 
 include_tables limita o esquema mostrado pelo LangChain; não é, sozinho, autorização de SQL. A restrição efetiva fica na conexão. A ingestão continua usando sua conexão de escrita separada, e o histórico usa chat_history.db; essas permissões não são concedidas ao LLM.
 
@@ -258,3 +263,9 @@ emporio-musica-agent/
 ├── requirements.txt
 └── README.md
 ```
+
+## Transcrições automáticas e jornadas
+
+As conversas são salvas automaticamente em `conversas/`, com `transcricao.md` para leitura e `eventos.jsonl` para análise. Os arquivos incluem perguntas, respostas, recusas, erros e ferramentas capturadas, preservando a primeira execução. **Nova conversa** inicia outro contexto e preserva a conversa anterior no SQLite e nos arquivos. O código privado de retomada da sessão é omitido; o conteúdo ainda pode conter dados pessoais e deve ser revisado antes de compartilhar. A pasta está no `.gitignore`.
+
+Os seis roteiros, critérios e instruções estão em [CENARIOS_AVALIACAO.md](CENARIOS_AVALIACAO.md). Para executar a jornada principal com o Ollama real, use `python scripts/run_scenario.py C01`. Cada rodada gera outra pasta com transcrição, referências e `avaliacao.md` inicialmente **PENDENTE**. Concluir a execução não significa PASS. No C06, o reinício automatizado verifica o backend; a retomada no Streamlit também precisa de conferência manual.
