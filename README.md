@@ -1,18 +1,20 @@
-# Empório da Música — Assistente de atendimento
+# Empório da Música — Customer Service Assistant
 
-## Problema e objetivos
+## Problem and objectives
 
-A Empório da Música é uma loja fictícia de instrumentos musicais cujo atendimento recebe perguntas recorrentes sobre catálogo, preços, estoque, pedidos e políticas comerciais. O desafio consiste em construir um protótipo de assistente capaz de responder a essas solicitações em linguagem natural, consultando as fontes apropriadas em vez de depender exclusivamente do conhecimento do modelo.
+Empório da Música is a fictional musical instrument store whose customer service team receives recurring questions about its catalog, prices, stock, orders, and commercial policies. The challenge is to build an assistant prototype that answers these questions in natural language by consulting the appropriate sources rather than relying exclusively on the model's knowledge.
 
-O objetivo foi integrar dois tipos de informação: dados estruturados, armazenados originalmente em CSVs, e regras de atendimento descritas em um manual PDF. Para isso, desenvolvi um agente em Python que identifica quando consultar o banco de dados e quando recuperar trechos das políticas, mantendo o contexto de uma conversa e respondendo em português com uma persona amigável e profissional. A interface permite realizar consultas sucessivas sobre o mesmo produto, como preço, disponibilidade, parcelamento e frete.
+The objective was to integrate two kinds of information: structured data originally stored in CSV files and customer service rules described in a PDF manual. I developed a Python agent that identifies when to query the database and when to retrieve policy excerpts, maintains conversational context, and responds in Portuguese with a friendly, professional persona. The interface supports follow-up questions about the same product, such as its price, availability, installment options, and shipping cost.
 
-O escopo é **consultivo**: o agente não efetua compras, pagamentos, cancelamentos ou alterações de pedidos. A proposta é demonstrar a integração entre LLMs, ferramentas externas e dados de negócio, além de explicitar os limites do protótipo.
+The scope is **advisory**: the agent does not complete purchases, process payments, cancel orders, or modify orders. The project demonstrates the integration of LLMs, external tools, and business data while making the prototype's limitations explicit.
 
-## Como executar
+This README is in English. The application, prompts, source documents, and saved demonstration conversations remain in Portuguese. Existing file names, database identifiers, and UI labels are preserved below so they match the project.
 
-**Pré-requisitos:** Python com `venv` (ambiente validado com Python 3.14.6), [Ollama instalado](https://docs.ollama.com/linux), internet para os downloads iniciais e memória/espaço para os modelos. O provedor é o **Ollama local**, sem chave de API, no endereço padrão `http://localhost:11434`.
+## Running the project
 
-Execute os comandos na **raiz do projeto**, em Linux/Bash:
+**Prerequisites:** Python with `venv` (the development environment was validated with Python 3.14.6), [Ollama installed](https://docs.ollama.com/linux), internet access for initial downloads, and sufficient memory and disk space for the models. The model provider is **local Ollama**, with no API key, at the default address `http://localhost:11434`.
+
+Run these commands from the **project root**, using Linux/Bash:
 
 ```bash
 python3 -m venv .venv
@@ -20,16 +22,16 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-Se o Ollama ainda não estiver em execução como serviço, mantenha `ollama serve` ativo em outro terminal. No terminal do projeto:
+If Ollama is not already running as a service, keep `ollama serve` running in another terminal. In the project terminal:
 
 ```bash
 ollama pull qwen3.5:9b
 ollama list
 ```
 
-O modelo configurado é `qwen3.5:9b`. Para trocá-lo, ajuste `model_name` em `src/agent.py`; ele deve suportar chamadas de ferramentas e a configuração de raciocínio utilizada. O guardião recebe o mesmo nome de modelo.
+The configured model is `qwen3.5:9b`. To change it, update `model_name` in `src/agent.py`; the replacement must support tool calling and the reasoning configuration in use. The guardrail receives the same model name.
 
-Confira os arquivos esperados pela ingestão:
+Check that the required source files are available:
 
 ```text
 data/desafio_tecnico_ai_eng - products.csv
@@ -40,151 +42,255 @@ data/desafio_tecnico_ai_eng - categories.csv
 data/políticas_da_loja.pdf
 ```
 
-Com o Streamlit parado, prepare os dados e inicie o chat:
+With Streamlit stopped, prepare the data and start the chat:
 
 ```bash
 python src/data_ingestion.py
 python -m streamlit run src/app.py
 ```
 
-A ingestão gera `db/emporio.db` e `vectorstore/`; o modelo de embeddings é baixado na primeira execução. Confira as mensagens de sucesso das etapas SQLite e PDF. Abra a URL exibida pelo Streamlit, normalmente `http://localhost:8501`.
+Ingestion creates or updates `db/emporio.db` and `vectorstore/`; the embedding model is downloaded on the first run. Check the SQLite and PDF processing success messages. Open the URL printed by Streamlit, usually `http://localhost:8501`.
 
-Em novos terminais, reative `.venv`. Para recarregar alterações nos módulos, encerre com `Ctrl+C` e execute novamente o Streamlit. O código na barra lateral permite retomar a conversa em **Retomar conversa**, inclusive após reiniciar o servidor. **Nova conversa** inicia uma sessão independente e preserva a memória anterior para retomada pelo código, além das transcrições locais. Não é necessário repetir a ingestão a cada execução do chat.
+Activate `.venv` again in new terminals. After modifying application modules, stop Streamlit with `Ctrl+C` and start it again to reload the code. The private code in the sidebar allows the conversation to be resumed with **Retomar conversa** (Resume conversation), including after a server restart. **Nova conversa** (New conversation) creates an independent session and preserves the previous history and local transcripts. Ingestion does not need to run every time the chat starts.
 
-Teste o contexto na mesma conversa: escolha um produto, pergunte “Posso parcelar ele até quantas vezes?” e depois “Qual é o valor do frete?”. Essas perguntas estão no escopo; as condições devem ser consultadas nas políticas da loja.
+To check conversational context, select a product and then ask about installment options and shipping in the same conversation. These questions are in scope; the applicable terms must come from the store policies.
 
-### Atualização incremental dos dados
+### Incremental data updates
 
-`python src/data_ingestion.py` usa `INSERT ... ON CONFLICT DO UPDATE`, com staging temporário e uma transação para a carga SQL:
+`python src/data_ingestion.py` uses `INSERT ... ON CONFLICT DO UPDATE`, temporary staging tables, and a transaction for the SQL load:
 
-| Tabela | Chave primária |
+| Table | Primary key |
 | --- | --- |
 | `produtos` | `product_id` |
 | `pedidos` | `order_id` |
 | `clientes` | `customer_id` |
 | `promocoes` | `promotion_id` |
 
-O pipeline insere IDs novos, atualiza apenas campos presentes no CSV e mantém linhas que não vierem na carga; um CSV inalterado não provoca atualizações desnecessárias. Ausência no arquivo não significa exclusão ou desativação: envie `status` ou `is_active` atualizado explicitamente. Outras tabelas do banco e `db/chat_history.db` são preservados.
+The pipeline inserts new IDs, updates only fields supplied by the CSV, and preserves records absent from the load. An unchanged CSV does not trigger unnecessary updates. An omitted record is not considered deleted or inactive: explicitly update `status` or `is_active`. Other database tables and `db/chat_history.db` are preserved.
 
-Tabelas antigas sem chave primária são migradas preservando registros, índices e triggers. Se houver chaves nulas ou duplicadas, a migração é abortada, sem escolher silenciosamente qual registro manter. Os nomes reais das colunas (`price_brl`, `category_id`, entre outros) são preservados.
+Legacy tables without primary keys are migrated while preserving records, indexes, and triggers. Null or duplicate keys abort the migration instead of silently choosing which record to retain. Original column names, such as `price_brl` and `category_id`, are preserved.
 
-As fontes cadastradas são lidas e validadas antes das alterações. Uma falha durante a carga SQL provoca rollback de todas as tabelas daquela execução. Essa transação não inclui o ChromaDB: se a etapa do PDF falhar, corrija a causa e execute novamente o comando, sem apagar manualmente o banco ou o índice.
+Registered sources are read and validated before changes are applied. A failure during SQL loading rolls back all tables in that run. This transaction does not include ChromaDB: if PDF processing fails, fix the cause and run ingestion again without manually deleting the database or index.
 
-Para adicionar outro CSV, cadastre seu arquivo em `SOURCES` e sua chave em `PRIMARY_KEYS`, em `src/data_ingestion.py`. A nova tabela será criada em `emporio.db` sem apagar as existentes; informe suas relações no prompt e reinicie o agente para atualizar o esquema conhecido. O [guia completo](README_full.md) traz um exemplo.
+To add another CSV, register its file in `SOURCES` and its key in `PRIMARY_KEYS` in `src/data_ingestion.py`. The new table can be created in the same database without deleting existing tables. Exposing it to the agent also requires reviewing the allowlist in `src/sql_access.py`, explaining its relationships in the prompt, and restarting the agent. See the [detailed guide](README_full.md) for additional ingestion examples.
 
-## Transcrições automáticas e jornadas
+## Conversation exports and scenario runs
 
-Para salvar as mensagens pelo chat, clique em **Salvar mensagens**, na barra lateral. O navegador baixa um arquivo Markdown com a conversa atual, incluindo a última resposta. Salve antes de clicar em **Nova conversa**. O download não chama o modelo nem executa cenários; revise informações pessoais antes de compartilhar.
+Click **Salvar mensagens** (Save messages) in the sidebar to download a Markdown file containing the current conversation, including the latest response. Export before switching to another conversation. Downloading does not call the model or execute evaluation scenarios. Review personal information before sharing the file.
 
-As conversas são salvas automaticamente em `conversas/`, com `transcricao.md` para leitura e `eventos.jsonl` para análise. Os arquivos incluem perguntas, respostas, recusas, erros e ferramentas capturadas, preservando a primeira execução. **Nova conversa** inicia outro contexto e preserva a conversa anterior no SQLite e nos arquivos. O código privado de retomada da sessão é omitido; o conteúdo ainda pode conter dados pessoais e deve ser revisado antes de compartilhar. A pasta está no `.gitignore`.
+Conversations are also saved automatically under `conversas/`, with `transcricao.md` for reading and `eventos.jsonl` for analysis. These files include questions, answers, refusals, errors, and captured tool activity. The JSONL journal preserves earlier events while the Markdown view is refreshed. **Nova conversa** starts a separate context and preserves the previous conversation in SQLite and the transcript files.
 
-Os seis roteiros, critérios e instruções estão em [CENARIOS_AVALIACAO.md](CENARIOS_AVALIACAO.md). Para executar a jornada principal com o Ollama real, use `python scripts/run_scenario.py C01`. Cada rodada gera outra pasta com transcrição, referências e `avaliacao.md` inicialmente **PENDENTE**. Concluir a execução não significa PASS. No C06, o reinício automatizado verifica o backend; a retomada no Streamlit também precisa de conferência manual.
+The current session's private resumption code is omitted from automatic transcripts, but their content can still contain personal information. New transcript directories and files use Linux permissions `700` and `600`; they are not encrypted or tamper-proof. `conversas/` is excluded by `.gitignore`. Review and redact any information or credentials before sharing a transcript. Retention and deletion are manual.
 
-## Decisões arquiteturais
+The six scripts, expectations, and review instructions are documented in [CENARIOS_AVALIACAO.md](CENARIOS_AVALIACAO.md). With Ollama running and ingestion completed:
 
-A escolha das tecnologias priorizou a reutilização de conhecimentos adquiridos em projetos acadêmicos de processamento de dados, modelos de linguagem e recuperação de informações. Isso permitiu concentrar o desenvolvimento na integração entre as fontes e na experiência de atendimento, enquanto o LangChain foi incorporado para simplificar a orquestração das ferramentas.
+```bash
+python scripts/run_scenario.py --list
+python scripts/run_scenario.py C01
+```
 
-Optei por uma arquitetura em Python com um agente orientado a ferramentas. Os dados transacionais e as políticas documentais têm características diferentes e, por isso, são tratados por mecanismos distintos. O agente utiliza ferramentas SQL para informações estruturadas e uma ferramenta de recuperação semântica para o PDF. A interface, o histórico de mensagens e a classificação de escopo ficam separados dessas consultas.
+Every run creates a separate directory containing transcripts, reference data, execution metadata, and an `avaliacao.md` review template initially marked **PENDENTE** (Pending). Completing a run does not imply PASS. In C06, the automated restart checks backend persistence; resuming the conversation through Streamlit also requires manual verification.
 
-**SQLite — dados estruturados.** Escolhi o SQLite por ser leve, relacional e suficiente para o volume dos arquivos fornecidos. Ele permite aplicar filtros, ordenações e contagens sobre produtos, estoque e pedidos sem depender de similaridade semântica ou da memória do LLM. A escolha também aproveitou minha experiência prévia com bancos de dados e processamento de informações no projeto de mestrado. Nesta versão, a ingestão importa produtos, pedidos, clientes e promoções; categorias é lido como referência pública dos tipos de instrumento, sem tabela SQL; itens de pedidos ainda não integram o banco utilizado pelo agente. As promoções são relacionadas por product_id e apenas is_active = 1 libera o desconto.
+The five saved demonstrations used in the qualitative assessment below are in [conversas_exemplos/](conversas_exemplos/). They are separate from private automatic transcripts and from the six executable scenario definitions.
 
-**ChromaDB — base vetorial.** Para as políticas da loja, aproveitei minha experiência de pesquisa com representações vetoriais, embeddings e recuperação de informações. O ChromaDB fornece um índice persistente, permitindo reutilizar os embeddings do manual entre execuções. A busca semântica é empregada para localizar trechos pertinentes; ela não substitui consultas exatas ao banco de produtos.
+## Architectural decisions
 
-**Streamlit — interface de demonstração.** Escolhi o Streamlit porque já tinha familiaridade com a construção de interfaces e visualizações em Python no contexto acadêmico. Como o objetivo da seleção é avaliar o agente funcionando, essa abordagem permitiu criar rapidamente um chat navegável sem desenvolver um frontend separado. O `session_state` mantém a apresentação da conversa e um identificador próprio para cada sessão.
+The technology choices prioritized reusing knowledge acquired through academic projects involving data processing, language models, and information retrieval. This made it possible to focus development on integration between sources and the customer service experience, while LangChain was introduced to simplify tool orchestration.
 
-**LangChain — integração e orquestração.** O LangChain foi a principal tecnologia nova incorporada neste desafio. Adotei-o por oferecer abstrações prontas para conectar `ChatOllama`, ferramentas SQL, o retriever do ChromaDB e o histórico de mensagens. `create_tool_calling_agent` e `AgentExecutor` coordenam a seleção e execução das ferramentas; `RunnableWithMessageHistory` reaproveita o contexto da sessão.
+I chose a Python architecture built around an agent that uses tools. Transactional data and policy documents have different characteristics, so they are handled through different mechanisms. The agent uses SQL tools for commercial catalog information and semantic retrieval for the PDF. The interface, message history, scope classification, and controlled order lookup are separate components.
 
-Isso reduziu a necessidade de implementar manualmente todo o protocolo de chamadas de ferramentas e permitiu concentrar o desenvolvimento nas regras de domínio e na experiência de atendimento. Como contrapartida, a solução depende de componentes de `langchain-classic` e de APIs de memória que exigirão acompanhamento de compatibilidade.
+**SQLite — structured data.** I chose SQLite because it is lightweight, relational, and sufficient for the supplied data volume. It supports exact filtering, sorting, and counts without relying on semantic similarity or the LLM's memory. The choice also builds on my database and data processing experience from my master's research. This version imports products, orders, customers, and promotions. Categories are read as a public reference for instrument types without being imported as a SQL table; order items are not yet ingested. Promotions are linked through `product_id`, and only `is_active = 1` enables a discount.
 
-## Escolha do modelo: Qwen 3.5 9B com Ollama
+**ChromaDB — vector storage.** For store policies, I reused research experience with vector representations, embeddings, and information retrieval. ChromaDB provides a persistent index so the manual's embeddings can be reused across runs. Semantic search locates relevant excerpts; it does not replace exact product queries.
 
-Escolhi o `qwen3.5:9b` executado localmente pelo Ollama porque o desafio requer interpretação de mensagens em português e chamadas de ferramentas, e eu já tinha experiência prática com modelos locais e Ollama em atividades do mestrado. Reaproveitar esse ambiente reduziu o tempo de configuração e permitiu desenvolver e testar o agente sem depender de uma API paga a cada mensagem.
+**Streamlit — demonstration interface.** I chose Streamlit because I was already familiar with building Python interfaces and visualizations in academic projects. Since the selection process aims to assess the working agent, this approach enabled a usable chat interface without developing a separate frontend. `session_state` holds the conversation's presentation and its session identifier.
 
-O modelo é integrado por `ChatOllama`, com temperatura `0`, `reasoning=False`, janela configurada de `8.192` tokens e limite de geração de `4.096` tokens. Esses parâmetros procuram favorecer respostas diretas e disponibilizar contexto suficiente para histórico, ferramentas e seus resultados; temperatura zero, entretanto, não garante respostas sempre idênticas ou corretas.
+**LangChain — integration and orchestration.** LangChain was the main new technology introduced in this challenge. Its abstractions connect `ChatOllama`, SQL tools, the ChromaDB retriever, and message history. `create_tool_calling_agent` and `AgentExecutor` coordinate tool selection and execution; `RunnableWithMessageHistory` reuses session context.
 
-A escolha foi pragmática, considerando o hardware disponível e a experiência prévia com a ferramenta. **Não foi realizado um benchmark comparativo rigoroso entre diferentes modelos nesta implementação**, de modo que não afirmo que o Qwen 3.5 9B seja o melhor modelo possível para a tarefa.
+This reduced the need to implement the tool-calling protocol manually and allowed development to focus on domain rules and the service experience. The tradeoff is a dependency on `langchain-classic` components and memory APIs that require compatibility monitoring.
 
-Uma evolução seria comparar modelos sob os mesmos cenários, incluindo qualidade de tool calling, latência, consumo de memória e respostas em português.
+## Model choice: Qwen 3.5 9B with Ollama
 
-## Estratégia de retrieval para as políticas da loja
+I chose `qwen3.5:9b`, running locally through Ollama, because the challenge requires Portuguese language understanding and tool calling, and I already had practical experience with local models and Ollama during my master's research. Reusing this environment reduced setup time and enabled development without paying for an API call on every message.
 
-As informações de produtos são consultadas pelas ferramentas SQL; o status de pedidos usa uma consulta parametrizada após a conferência de pedido e cliente; as regras sobre devolução, troca, garantia, horário, frete e pagamento são recuperadas do PDF por busca semântica.
+The model is integrated through `ChatOllama`, using temperature `0`, `reasoning=False`, an `8,192`-token context window, and a `4,096`-token generation limit. These settings aim to encourage direct answers while allowing room for history, tools, and tool outputs. Temperature zero does not guarantee identical or correct responses.
 
-A ingestão divide o manual em **trechos de 1.000 caracteres, com sobreposição de 100 caracteres**, para reduzir a perda de contexto nas fronteiras entre fragmentos. Cada trecho é convertido em vetor pelo modelo `sentence-transformers/all-MiniLM-L6-v2` e armazenado no ChromaDB.
+This was a pragmatic choice based on available hardware and prior experience. **No rigorous comparison across different models was conducted**, so I do not claim Qwen 3.5 9B is the best possible model for the task.
 
-Quando o agente precisa consultar uma política, a ferramenta `consulta_politicas_loja` busca os **três fragmentos mais próximos da pergunta (`top-k = 3`)**. O Qwen recebe esses trechos e formula a resposta.
+A future improvement would compare models using the same scenarios, including tool-calling quality, latency, memory consumption, and Portuguese responses.
 
-A utilização de embeddings e recuperação vetorial reaproveita conhecimentos e técnicas com os quais já trabalhava no mestrado, especialmente a representação semântica de textos. O tamanho dos trechos e o valor de `k` são parâmetros iniciais do protótipo, não resultados de uma otimização experimental.
+## Retrieval strategy for store policies
 
-Essa abordagem possui limitações. A semelhança vetorial não garante que o trecho recuperado contenha todas as condições necessárias para responder. O modelo de embeddings escolhido pode ter limitações para perguntas formuladas em português, e a qualidade da recuperação ainda não foi medida sistematicamente com um conjunto de perguntas e evidências de referência.
+Product information is queried through SQL tools. Order details use a separate parameterized query after matching the order and customer IDs. Rules covering returns, exchanges, warranties, opening hours, shipping, and payments are retrieved from the PDF through semantic search.
 
-A ingestão do PDF usa IDs SHA-256 calculados pela fonte e pelo conteúdo de cada trecho. Trechos idênticos reutilizam seus vetores; trechos novos ou alterados são gravados sem apagar vectorstore. Após a gravação, somente versões obsoletas do mesmo PDF são removidas. Documentos de outras fontes são preservados. A primeira carga também migra os IDs aleatórios do índice anterior.
+Ingestion splits the manual into **1,000-character chunks with a 100-character overlap**, reducing context loss at chunk boundaries. Each chunk is embedded using `sentence-transformers/all-MiniLM-L6-v2` and stored in ChromaDB.
 
-Como próximos passos, avaliaria modelos multilíngues, diferentes configurações de chunking e top-k, além de versionamento das políticas e publicação atômica de novas versões do índice.
+When the agent needs a policy, `consulta_politicas_loja` retrieves the **three closest chunks (`top-k = 3`)**. Qwen receives these excerpts and generates an answer.
 
-## Estratégia de prompt
+Embeddings and vector retrieval reuse concepts from my master's research, particularly semantic text representations. Chunk size and `k` are initial prototype parameters rather than the outcome of experimental optimization.
 
-Perguntas curtas de disponibilidade, como “Tem baterias?”, são resolvidas por consulta estruturada ao estoque após o guardião. O código usa o CSV de categorias para identificar a categoria correta, trata singular/plural e monta a tabela com produtos ativos e estoque positivo. Pedidos com filtros adicionais continuam no agente, que também recebe essa referência interna para não deduzir IDs de categoria.
+Semantic similarity does not guarantee that retrieved excerpts include every condition needed for an answer. The chosen embedding model may have limitations for Portuguese queries, and retrieval quality has not been systematically measured against a set of questions and reference evidence.
 
+PDF ingestion uses SHA-256 IDs derived from the source and each chunk's content. Identical chunks reuse their vectors; new or modified chunks are written without deleting `vectorstore/`. After successful writes, only obsolete versions belonging to the same PDF are removed. Other document sources are preserved. The first incremental load also migrates random IDs from the previous index.
 
-O prompt define a persona de atendimento em português e orienta o uso de SQL para catálogo, preços e estoque, e de `consulta_politicas_loja` para condições comerciais. As regras distinguem produtos ativos de produtos com estoque, exigem consultas antes de informar valores e orientam a solicitação de dados ausentes, como o destino da entrega. O histórico da sessão e os resultados das ferramentas entram no contexto para permitir perguntas de continuação.
+Future work includes multilingual embeddings, alternative chunking and top-k settings, policy versioning, and atomic publication of new index versions.
 
-As instruções também tratam a apresentação: listas completas quando solicitadas, nomes comerciais dos produtos em vez de códigos internos de categoria e alternativas com disponibilidade consultada. Para listagens simples reconhecidas por `src/catalog.py`, a tabela e os totais são calculados diretamente do SQLite. Essa verificação complementa o prompt, sem tornar todas as respostas determinísticas.
+## Prompt strategy
 
-## Segurança e controle de escopo
+Short availability questions, such as asking whether drums are available, use a structured stock query after the guardrail. The code resolves the correct category through the categories CSV, handles singular/plural forms, and builds a table containing active products with positive stock. Requests with additional filters remain with the agent, which receives the same category reference to avoid guessing IDs.
 
-Antes de chamar o agente, a função `process_user_message` executa um **guardião de escopo**. Esse componente utiliza o mesmo Qwen para classificar a mensagem como `PERMITIDA` ou `BLOQUEADA`, considerando a pergunta atual e um histórico recente limitado, transmitido como dados JSON.
+The prompt defines a Portuguese customer service persona and directs SQL use for catalog, price, and stock information, with `consulta_politicas_loja` for commercial policies. Its rules distinguish active products from products in stock, require queries before stating prices, and ask for missing information such as the delivery destination. Session history and tool results provide context for follow-up questions.
 
-Perguntas sobre instrumentos e atendimento da loja são encaminhadas; solicitações externas ao domínio, como produção de código ou assuntos sem relação com a loja, são recusadas educadamente.
+Presentation instructions require complete lists when requested, commercial product names rather than internal category codes, and alternatives with verified availability. For simple listings recognized by `src/catalog.py`, tables and totals are calculated directly from SQLite. This complements the prompt without making every answer deterministic.
 
-O guardião opera em **fail-closed** para falhas técnicas ou de formato. A classificação exata PERMITIDA libera o agente. Uma regra restrita reconhece perguntas completas sobre o instrumento escolhido na própria conversa e corrige um BLOQUEADA indevido, registrando `rule=own_product_recall` e a decisão original. Essa regra não aceita pedidos adicionais ou acesso a outras sessões e não libera exceções ou saídas inválidas. Uma saída inválida é tentada novamente uma vez; se persistir, ou houver exceção/indisponibilidade do classificador, a pergunta é bloqueada e o evento é registrado. A interface apresenta uma mensagem amigável de validação, sem executar as ferramentas nem expor a exceção interna.
+## Security and scope control
 
-O histórico do atendimento é separado por identificador de sessão e persiste em db/chat_history.db usando SQLChatMessageHistory. O código da conversa pode ser usado na barra lateral para retomar as mensagens e o contexto após reiniciar. A opção **Nova conversa** inicia uma sessão independente e preserva a memória anterior e as transcrições locais.
+Before the general agent is called, `process_user_message` runs a **scope guardrail**. It uses the same Qwen model to classify the message as `PERMITIDA` (Allowed) or `BLOQUEADA` (Blocked), considering the current question and a bounded recent history supplied as JSON data. The controlled order flow is handled separately by fixed code rather than the general agent.
 
-**Limite importante:** esse guardião controla assunto, não identidade nem permissões de acesso.
+Questions about instruments and store service are forwarded; requests outside the domain, such as writing code or unrelated topics, are politely refused.
 
-As ferramentas comerciais usam uma conexão SQLite aberta com mode=ro e query_only. Além de include_tables, um authorizer permite somente leituras de produtos e promocoes, bloqueando escrita, DDL, ATTACH, PRAGMA e funções não autorizadas. As tabelas clientes e pedidos não ficam disponíveis nas ferramentas do modelo, inclusive para consultas SQL diretas. Um fluxo separado em `src/order_status.py` pede o ID de cliente e só retorna os detalhes comerciais quando uma consulta parametrizada encontra o par `order_id` e `customer_id`. Uma falha retorna a mesma mensagem para pedido inexistente ou ID incorreto, sem revelar o titular esperado. O esquema enviado ao LLM não contém amostras de registros.
+The guardrail **fails closed** on technical failures or invalid output. An exact `PERMITIDA` classification releases the general agent. A restricted rule recognizes complete questions about the instrument chosen in the current conversation and corrects an incorrect `BLOQUEADA`, logging `rule=own_product_recall` and the original decision. This rule does not accept appended instructions, requests for other sessions, exceptions, or invalid classifier output.
 
-A criação e a retomada de conversas exigem UUID4 em formato hexadecimal de 32 caracteres, validado também no backend. O código é uma credencial bearer: quem o conhece pode acessar aquele histórico. Isso reduz adivinhação, mas não substitui autenticação, expiração, revogação e autorização por titularidade. A consulta de status de pedidos ainda não valida a identidade do solicitante; o protótipo não deve ser apresentado como pronto para produção. O classificador por LLM também não é uma proteção comprovada contra toda forma de prompt injection.
+Invalid output is retried once. If it remains invalid, or the classifier raises an exception or becomes unavailable, the request is blocked and the event is logged. The interface shows a friendly validation message without exposing internal exceptions.
 
-Eventos SAFE, BLOCKED, PARSE_ERROR e EXCEPTION são registrados em guardrail_metrics.log, com ID de requisição, latência, tentativa e indicador de fallback, sem o texto integral das conversas. O arquivo tem rotação. Esses dados medem decisões e falhas de formato/operação; a taxa de acerto semântico exige perguntas rotuladas para comparação.
+Conversation history is isolated by session identifier and persisted in `db/chat_history.db` through `SQLChatMessageHistory`. The private code in the sidebar restores messages and context after a restart. **Nova conversa** creates an independent session while preserving previous history and transcripts.
 
-### Consulta de status no protótipo
+**Important limitation:** scope classification does not verify identity or grant access permissions.
 
-Envie “Quero saber a situação do meu pedido 9”. O chat pede seu **ID de cliente** (`customer_id`). Responda, por exemplo, “Meu ID é …”, com o valor do seu cadastro. Somente uma correspondência entre pedido e cliente libera os detalhes comerciais; também é possível informar os dois números na mesma mensagem. Cada novo pedido exige seu ID novamente. A consulta mostra data, status, valor total, forma de pagamento, rastreamento e previsão de entrega cadastrados, sem repetir o número do pedido. Campos ausentes aparecem como não informados. Nome, telefone, endereço e notas internas continuam indisponíveis. O fluxo não usa as ferramentas SQL livres do LLM.
+Commercial tools use SQLite with `mode=ro` and `query_only`. Beyond `include_tables`, an authorizer allows only reads from `produtos` and `promocoes`, blocking writes, DDL, `ATTACH`, `PRAGMA`, and unauthorized functions. The LLM's tools cannot access `clientes` or `pedidos`, even through direct SQL. The schema supplied to the model contains no sample records.
 
-Essa conferência é uma simplificação para demonstração, não autenticação de identidade. Não use dados reais ou publique IDs de clientes nas conversas de entrega. Para produção, seriam necessários autenticação, autorização pelo usuário autenticado e proteção contra tentativas repetidas.
+A separate flow in `src/order_status.py` requests a customer ID and returns commercial order details only when a parameterized query matches both `order_id` and `customer_id`. Missing orders and incorrect customer IDs produce the same failure message without revealing the expected customer.
 
-## Limitações e próximos passos
+Creating and resuming conversations requires a UUID4 represented as 32 hexadecimal characters, validated in the backend. The private code acts as a bearer credential: anyone who possesses it can access that history. This reduces guessing but does not replace identity authentication, expiration, revocation, or ownership-based authorization. The prototype must not be presented as production-ready. An LLM classifier is also not a proven defense against every form of prompt injection.
 
-**Limitações conhecidas:**
+Events `SAFE`, `BLOCKED`, `PARSE_ERROR`, and `EXCEPTION` are recorded in the rotating `guardrail_metrics.log`, with request ID, latency, attempt, and fallback indicator, without complete conversation text. These metrics describe decisions and operational/formatting failures; semantic accuracy requires labeled reference questions.
 
-- A ingestão carrega produtos, pedidos, clientes e promoções; o CSV de categorias é usado como referência pública de nomes e IDs, sem importação SQL, e itens de pedidos ainda não são importados. O SQL usa staging temporário e upsert por chave primária, preservando registros ausentes do CSV e outras tabelas. IDs nulos ou duplicados interrompem a carga. No ChromaDB, a sincronização por fonte não é uma transação conjunta com o SQLite; uma interrupção pode exigir repetir a carga.
-- O modelo pode errar SQL, classificação de escopo ou interpretação das políticas. A correção determinística de catálogo cobre apenas consultas simples reconhecidas; não valida toda resposta gerada. A qualidade do retrieval em português ainda não foi avaliada sistematicamente.
-- A memória persiste em SQLite e a retomada depende do código UUID4 privado. Ainda faltam autenticação de identidade, expiração/revogação de códigos e autorização por titularidade para pedidos. A conferência de pedido e cliente é simplificada: IDs digitados podem ser conhecidos ou adivinhados e não autenticam o solicitante. Não há limite dedicado de tentativas. As ferramentas SQL já são somente leitura e não acessam clientes nem pedidos.
-- O desempenho depende do hardware; o guardião acrescenta uma chamada por pergunta, com nova tentativa se o formato for inválido. As dependências não estão integralmente fixadas, e as APIs de memória utilizadas têm avisos de descontinuação na versão instalada.
+### Order lookup in the prototype
 
-**Com mais tempo:** integrar as fontes restantes e versionar as políticas com publicação atômica; avaliar embeddings multilíngues e reranking com perguntas de referência; ampliar testes de fluxo e precisão das respostas; gerenciar a retenção do histórico, implementar autenticação e autorização por titularidade; fixar versões e migrar as APIs de memória legadas.
+Ask for the status of an order using its number. The chat requests your **customer ID** (`customer_id`). Respond with the ID from the supplied dataset. Only a matching order/customer pair releases commercial details; both numbers may also be supplied in the same message. Each new order requires the customer ID again.
 
-## Uso do OpenAI Codex no desenvolvimento
+The response includes the recorded order date, status, total amount, payment method, tracking code, and estimated delivery, without repeating the order number. Missing fields are explicitly marked as unavailable. Names, phone numbers, addresses, and internal notes remain inaccessible. This flow does not use the LLM's general SQL tools.
 
-Utilizei o **OpenAI Codex** como assistente de programação durante a implementação, depuração e documentação do protótipo.
+This check is a demonstration shortcut, **not identity authentication**. Do not use real personal data or publish customer IDs in submission transcripts. Production use would require authentication, authorization based on the authenticated user, and protection against repeated attempts.
 
-O uso da ferramenta foi organizado em ciclos: observar comportamentos do chat, identificar um problema ou necessidade, examinar os módulos relacionados, propor um ajuste e verificar seus efeitos por meio de testes e novas interações.
+## Evaluation of the agent demonstrations
 
-O Codex apoiou ajustes de compatibilidade do LangChain, consultas e apresentação do catálogo, formatação no Streamlit, gerenciamento da memória e classificação de escopo. Também auxiliou na criação e execução de testes automatizados e na redação da documentação.
+The following qualitative assessment was supplied for the five saved demonstrations. It records observed behavior in those conversations, including failures; it is not a claim that every finding has been independently reverified against the current version. Subsequent changes described above do not establish that a scenario now passes: the journeys need to be rerun with their original transcripts preserved. Prices and stock below describe the evaluated data, not live commercial quotes.
 
-As verificações documentadas incluem `unittest`, testes da interface com Streamlit AppTest e interações manuais com o Ollama; os testes com dependências simuladas não substituem a avaliação das respostas do modelo real.
+### Purpose and selection rationale
 
-O uso de IA acelerou tarefas repetitivas e a investigação de erros, mas o código gerado precisa ser compreendido e revisado antes da entrega.
+Five conversational journeys were selected to assess the customer service agent in situations resembling the needs of a musical instrument store. The selection prioritized multiple turns, structured and documentary information, context retention, exception handling, and security boundaries.
 
-Minha responsabilidade é conseguir explicar as decisões adotadas, reproduzir as funcionalidades essenciais, identificar limitações e distinguir comportamentos comprovados de hipóteses ainda não avaliadas. Não apresento a utilização do Codex, isoladamente, como garantia de qualidade da solução.
+The aim was not only to assess whether the model could answer questions, but also to investigate how the system's components work together: Qwen 3.5, LangChain, SQLite, ChromaDB, Streamlit, message history, and access controls.
 
-As dez perguntas executadas com o Ollama real e suas respostas estão em [AVALIACAO_QWEN.md](AVALIACAO_QWEN.md). Para repetir essa avaliação, com o Ollama ativo e os dados preparados, execute `python scripts/evaluate_qwen.py`. Essa avaliação empírica complementa os testes automatizados e documenta os resultados efetivamente observados.
+The five journeys present complementary challenges and reduce repetition across examples. Their demonstration numbers differ from the six executable scenario IDs:
 
-Detalhes de arquitetura, módulos, solução de problemas e operação estão no [guia completo](README_full.md).
+| Demonstration | Saved transcript | Executable scenario |
+| --- | --- | --- |
+| 01 — Complete purchase journey | [01_jornada_compra.md](conversas_exemplos/01_jornada_compra.md) | C01 |
+| 02 — Unavailable product and alternatives | [02_produto_indisponivel.md](conversas_exemplos/02_produto_indisponivel.md) | C03 |
+| 03 — Orders, privacy, and policies | [03_pedido_privacidade.md](conversas_exemplos/03_pedido_privacidade.md) | C04 |
+| 04 — Comparing two products | [04_comparacao_produtos.md](conversas_exemplos/04_comparacao_produtos.md) | C05 |
+| 05 — Memory and conversation continuity | [05_memoria_persistente.md](conversas_exemplos/05_memoria_persistente.md) | C06 |
 
-## Estrutura
+### Scenario 01 — Complete purchase journey
+
+**Purpose:** follow a customer from browsing the catalog to selecting the Crafter D-8, checking promotions, installments, stock, shipping, and attempting to complete the purchase.
+
+**Results:** the agent correctly listed 33 available acoustic guitars, identified the Crafter D-8 price as BRL 4,599.00, found no promotion, and reported two units in stock. The calculation of seven installments of BRL 657.00 was also consistent.
+
+However, when Belém/PA was given as the destination, the system quoted a fixed BRL 120.00 shipping charge without support from the manual. At the end, it suggested it could proceed with the purchase even though the prototype does not implement checkout.
+
+**Analysis:** commercial data integration and conversational continuity showed positive results, but the application needs to better recognize information requiring a separate quote and operations it does not implement.
+
+### Scenario 02 — Unavailable product and alternatives
+
+**Purpose:** check how the agent handles a discontinued instrument, identifies available alternatives, and answers follow-up questions about price, promotions, installments, and shipping.
+
+**Results:** the system identified the Ibanez Bass 2X as discontinued, offered alternatives, and correctly selected the Music Man Bass 4X as the lowest-priced available bass.
+
+However, it incorrectly stated that the Ibanez had no stock despite 13 registered units, and later said the instrument was not in the catalog. The final recommendation request was blocked twice.
+
+**Analysis:** the scenario showed a need to distinguish catalog registration, physical stock, and commercial availability, and to reduce false guardrail blocks.
+
+### Scenario 03 — Orders, privacy, and policies
+
+**Purpose:** assess the handling of order information, personal data protection, and retrieval of return, exchange, and warranty rules.
+
+**Results:** the agent refused requests for names, phone numbers, and addresses, including when the user claimed to be the buyer. It also correctly identified that the withdrawal period for an online purchase starts upon receipt.
+
+However, it claimed to have confirmed order ownership solely from a customer ID supplied by the user, which does not constitute authentication. It also provided warranty information unsupported by the manual and did not correctly distinguish every type of exchange.
+
+**Analysis:** this scenario exposed the evaluation's most significant limitation. Database column restrictions do not replace ownership verification through authentication, and answers about customer rights and policies require more rigorous factual validation.
+
+### Scenario 04 — Comparing two products
+
+**Purpose:** test simultaneous queries for two instruments, price comparison, a combined purchase calculation, and the application of payment and shipping policies.
+
+**Results:** the agent correctly retained the Crafter D-8 and Tagima Woodstock prices and identified a BRL 3,700.00 difference.
+
+However, when asked about installments on the combined total, it calculated terms separately for each instrument. Purchasing both would total BRL 5,498.00, which could be split into ten installments of BRL 549.80, subject to the other applicable conditions. The final summary request was also blocked by the guardrail.
+
+**Analysis:** the system demonstrated the ability to compare individual products but struggled to represent a combined commercial calculation and produce a final synthesis covering multiple details.
+
+### Scenario 05 — Memory and conversation continuity
+
+**Purpose:** assess product selection through indirect references, conversational continuity, session persistence, commercial policies, and behavior after an out-of-scope message.
+
+**Results:** the agent identified the Rozini RC-104 as the second product in the list, retained its BRL 459.90 price, and later correctly reported ten units available.
+
+However, it initially blocked a legitimate question about the selected product. On the next attempt, it claimed not to have access to history while contradictorily mentioning the selected instrument. It also offered free shipping for a product below the BRL 500 threshold. The transcript contains no verifiable record of the application restart and session resumption.
+
+**Analysis:** there is evidence of conversational continuity, but persistence after a restart still needs a reproducible demonstration, and shipping policy retrieval needs correction.
+
+### Contributions identified
+
+The demonstrations showed integration between relational queries, document retrieval, and conversational context, as well as the ability to identify specific failures in commercial rules, request interpretation, and scope control.
+
+The evaluation also highlighted the importance of distinguishing the final answer shown to the user from the tools' internal behavior. Correctly attributing failures requires recording tool calls, arguments, query results, and the system version used.
+
+### Future contributions
+
+**Critical priorities:** strengthen order protection, eliminate unsupported authentication claims, prevent checkout promises, and validate shipping and warranty conditions against the manual.
+
+**Conversational quality:** reduce false guardrail blocks, improve synthesis answers, preserve references to multiple products, and structure combined commercial calculations.
+
+**Evaluation and observability:** record versions, executed tools, evidence used, response time, and experimental conditions. Demonstrate session persistence with explicitly recorded restart and resumption steps.
+
+**Document retrieval:** build a question set with reference evidence and compare chunking settings, top-k values, and multilingual embedding models.
+
+### Assessment outcome
+
+The five scenarios were an appropriate selection because they cover commercial service, exceptions, privacy, combined reasoning, and memory. The transcripts demonstrated relevant functional behavior but also revealed failures that prevent the journeys from being classified as fully passed.
+
+The main outcome is a concrete diagnosis of areas needing improvement. The next step is to address the identified causes and repeat the journeys with the final version, preserving original transcripts as evidence of the development process.
+
+## Known limitations and next steps
+
+- Ingestion loads products, orders, customers, and promotions. The categories CSV provides a public name/ID reference without SQL ingestion; order items are not imported. SQL staging and primary-key upserts preserve records absent from a CSV and other tables. Null or duplicate IDs stop loading. ChromaDB source synchronization and SQLite updates do not share a transaction; an interruption may require rerunning ingestion.
+- The model can make SQL, scope classification, or policy interpretation errors. Deterministic catalog correction covers only recognized simple queries and does not validate every generated response. Portuguese retrieval quality has not been systematically evaluated. The saved demonstrations document errors in shipping, warranties, combined calculations, and operational boundaries.
+- History persists in SQLite and resumption requires the private UUID4 code. Identity authentication, code expiration/revocation, and authenticated order ownership checks are missing. Entered customer/order IDs can be known or guessed and do not authenticate the requester; no dedicated attempt limit is implemented. General SQL tools are read-only and cannot access customers or orders.
+- Performance depends on hardware. The guardrail adds a model call per general question and retries invalid output once. Dependencies are not fully pinned, and the installed memory APIs emit deprecation warnings.
+
+**With more time:** integrate the remaining sources; version policies with atomic publication; evaluate multilingual embeddings and reranking against reference questions; improve conversational flow and factual accuracy checks; validate combined commercial calculations; manage history retention; implement authentication and ownership-based authorization; pin dependency versions; and migrate legacy memory APIs.
+
+## Use of OpenAI Codex during development
+
+I used **OpenAI Codex** as a coding assistant during implementation, debugging, and documentation of the prototype.
+
+The workflow followed repeated cycles: observe chat behavior, identify a problem or need, inspect the relevant modules, propose an adjustment, and verify its effects through automated checks and new interactions.
+
+Codex assisted with LangChain compatibility, catalog queries and presentation, Streamlit formatting, memory management, and scope classification. It also helped create and run automated tests, implement conversation exports and controlled order lookup, and write the documentation.
+
+Documented checks include `unittest`, Streamlit AppTest, and manual Ollama interactions. Tests using simulated dependencies do not replace evaluation with the real model.
+
+AI assistance accelerated repetitive work and troubleshooting, but generated code needs to be understood and reviewed before submission. My responsibility is to explain the decisions, reproduce essential behavior, identify limitations, and distinguish verified results from untested assumptions. Using Codex alone is not a guarantee of quality.
+
+Ten earlier questions executed with real Ollama and their observed answers are recorded in [AVALIACAO_QWEN.md](AVALIACAO_QWEN.md). To repeat that earlier evaluation, with Ollama running and data prepared, run `python scripts/evaluate_qwen.py`. The script regenerates that report, so preserve the previous version before running it. This earlier evaluation is separate from the five saved demonstrations and the six scenario definitions.
+
+Additional architecture, module, troubleshooting, and operational details are available in the [detailed guide](README_full.md). Supporting documents and original transcripts currently remain in Portuguese.
+
+## Project structure
 
 ```text
 emporio-musica-agent/
@@ -196,34 +302,50 @@ emporio-musica-agent/
 │   ├── desafio_tecnico_ai_eng - order_items.csv
 │   ├── desafio_tecnico_ai_eng - promotions.csv
 │   ├── políticas_da_loja.pdf
-│   └── processado/            # Arquivos auxiliares fora do fluxo de ingestão
+│   └── processado/                  # Auxiliary files outside ingestion
 ├── db/
-│   ├── emporio.db             # Dados comerciais, incluindo promoções
-│   └── chat_history.db        # Histórico persistente por sessão
-├── vectorstore/               # Índice persistente do ChromaDB
+│   ├── emporio.db                   # Commercial data
+│   └── chat_history.db              # Persistent session history (private)
+├── vectorstore/                     # Persistent ChromaDB index
 ├── src/
-│   ├── data_ingestion.py      # CSVs → upsert SQL; PDF → sincronização por hashes
-│   ├── agent.py               # Modelo, ferramentas, prompt e recuperação de resposta
-│   ├── guardrails.py          # Classificação de escopo antes das ferramentas
-│   ├── conversation_logs.py   # Transcrições privadas e evidências por turno
-│   ├── memory.py              # Histórico persistente e validação UUID4
-│   ├── order_status.py        # Status somente após correspondência pedido/cliente
-│   ├── sql_access.py          # SQL de leitura e autorização de tabelas/colunas
-│   ├── catalog.py             # Busca por categoria e tabelas de estoque no SQLite
-│   └── app.py                 # Chat Streamlit e formatação de moeda
+│   ├── agent.py                     # Model, tools, prompt, and orchestration
+│   ├── app.py                       # Streamlit chat and Markdown download
+│   ├── catalog.py                   # Structured availability and catalog tables
+│   ├── conversation_logs.py         # Private transcripts and turn evidence
+│   ├── data_ingestion.py            # CSV upserts and PDF hash synchronization
+│   ├── guardrails.py                # Scope classification and bounded recall rule
+│   ├── memory.py                    # Persistent history and UUID4 validation
+│   ├── order_status.py              # Order details after order/customer matching
+│   └── sql_access.py                # Read-only catalog SQL and access restrictions
 ├── tests/
+│   ├── test_app.py
 │   ├── test_catalog.py
 │   ├── test_conversation.py
 │   ├── test_ingestion.py
-│   ├── test_app.py
-│   └── test_sql_access.py
+│   ├── test_order_status.py
+│   ├── test_sql_access.py
+│   └── test_transcripts.py
 ├── scripts/
-│   ├── run_scenario.py         # Seis jornadas; cada rodada preservada
-│   └── evaluate_qwen.py        # Dez cenários com o Ollama real
-├── cenarios/roteiros.json      # Mensagens e expectativas das seis jornadas
-├── conversas/                 # Arquivos privados gerados, ignorados pelo Git
-├── CENARIOS_AVALIACAO.md       # Guia de execução e revisão das jornadas
-├── AVALIACAO_QWEN.md           # Transcrições e evidências da avaliação
+│   ├── evaluate_qwen.py             # Earlier ten-question Ollama evaluation
+│   └── run_scenario.py              # Six journeys; a separate directory per run
+├── cenarios/
+│   └── roteiros.json                # Six scenario definitions and expectations
+├── conversas/                       # Private generated files; ignored by Git
+│   ├── conversa_<fingerprint>/
+│   │   ├── eventos.jsonl
+│   │   └── transcricao.md
+│   └── avaliacoes/                  # Scenario runs, references, and review templates
+├── conversas_exemplos/              # Five saved demonstration transcripts
+│   ├── 01_jornada_compra.md
+│   ├── 02_produto_indisponivel.md
+│   ├── 03_pedido_privacidade.md
+│   ├── 04_comparacao_produtos.md
+│   └── 05_memoria_persistente.md
+├── AVALIACAO_QWEN.md                # Earlier real-model observations
+├── CENARIOS_AVALIACAO.md            # Scenario execution and review guide
+├── README_full.md                   # Detailed supporting guide
+├── guardrail_metrics.log            # Generated rotating metrics; ignored by Git
 ├── requirements.txt
+├── .gitignore
 └── README.md
 ```
